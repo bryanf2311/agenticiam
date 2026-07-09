@@ -185,3 +185,61 @@ def test_audit_log_endpoint(client, admin_token):
     client.post("/v1/admin/identities", json={"kind": "agent", "name": "bot3"}, headers=headers)
     entries = client.get("/v1/admin/audit?limit=5", headers=headers).get_json()
     assert len(entries) > 0
+
+
+def test_index_serves_web_console(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"AgenticIAM" in resp.data
+    assert resp.mimetype == "text/html"
+
+
+def test_setup_status_before_and_after_bootstrap(client):
+    assert client.get("/v1/setup/status").get_json()["initialized"] is False
+    resp = client.post("/v1/setup/bootstrap", json={"username": "admin", "password": "correct-horse-battery"})
+    assert resp.status_code == 201
+    assert "access_token" in resp.get_json()
+    assert client.get("/v1/setup/status").get_json()["initialized"] is True
+
+
+def test_setup_bootstrap_grants_full_admin(client):
+    resp = client.post("/v1/setup/bootstrap", json={"username": "admin", "password": "correct-horse-battery"})
+    token = resp.get_json()["access_token"]
+    who = client.get("/v1/whoami", headers={"Authorization": f"Bearer {token}"}).get_json()
+    assert who["scopes"] == ["*"]
+
+    # the freshly bootstrapped admin can hit admin endpoints immediately
+    listing = client.get("/v1/admin/identities", headers={"Authorization": f"Bearer {token}"})
+    assert listing.status_code == 200
+
+
+def test_setup_bootstrap_rejects_short_password(client):
+    resp = client.post("/v1/setup/bootstrap", json={"username": "admin", "password": "short"})
+    assert resp.status_code == 400
+    assert client.get("/v1/setup/status").get_json()["initialized"] is False
+
+
+def test_setup_bootstrap_refuses_once_initialized(client, directory):
+    directory.create_identity("user", "someone")
+    resp = client.post("/v1/setup/bootstrap", json={"username": "admin", "password": "correct-horse-battery"})
+    assert resp.status_code == 409
+
+
+def test_login_success_and_failure(client, directory):
+    directory.create_role("r")
+    directory.grant_permission("r", "files:read")
+    identity = directory.create_identity("user", "alice", secret="hunter2-ish-pw")
+    directory.assign_role("r", "identity", "alice")
+
+    ok = client.post("/v1/login", json={"username": "alice", "password": "hunter2-ish-pw"})
+    assert ok.status_code == 200
+    assert ok.get_json()["scope"] == "files:read"
+
+    bad = client.post("/v1/login", json={"username": "alice", "password": "wrong"})
+    assert bad.status_code == 401
+
+
+def test_login_rejects_agent_kind(client, directory):
+    identity = directory.create_identity("agent", "bot1")
+    resp = client.post("/v1/login", json={"username": "bot1", "password": identity["secret"]})
+    assert resp.status_code == 401

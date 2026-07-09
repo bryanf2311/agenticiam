@@ -37,11 +37,12 @@ one place to:
   like running       │  tokens.py   (HS256 JWT) │     Cowork MCP config
   tools on a DC)     │                          │
                      │  api.py (Flask, HTTP):   │◀─── OpenClaw gateway, or any
-                     │   /oauth/token           │     HTTP-capable agent:
-                     │   /oauth/introspect      │       1. get a token
-                     │   /v1/authorize  (PDP)   │       2. POST /v1/authorize
-                     │   /v1/admin/*            │          before every
-                     └─────────────────────────┘          privileged action
+  agenticiam-gui ───▶│   /oauth/token           │     HTTP-capable agent:
+  (double-click,     │   /oauth/introspect      │       1. get a token
+  opens browser to   │   /v1/authorize  (PDP)   │       2. POST /v1/authorize
+  the same server)   │   /v1/admin/*            │          before every
+                     │   /  (web admin console) │          privileged action
+                     └─────────────────────────┘
 ```
 
 - **Directory**: identities are `user` (a human), `agent` (an AI agent),
@@ -67,6 +68,18 @@ one place to:
   file, or sending an email on an agent's behalf.
 
 ## Quickstart
+
+### Easiest: the GUI
+
+Download or build `agenticiam-gui` (see "Building the exe"), double-click
+it. It starts the directory server and opens your browser to a first-run
+setup screen — pick an admin username/password and you're in. From there
+the web console covers everything: creating agent/service/user identities,
+groups, roles and permissions, issuing revocable API keys, generating a
+ready-to-paste MCP config, and browsing the audit log. No terminal
+required.
+
+### Or: the CLI
 
 ```bash
 # Build (or download from a GitHub Actions run — see "Building the exe")
@@ -102,6 +115,22 @@ curl -X POST http://127.0.0.1:8765/v1/authorize \
      -d '{"token": "<access_token>", "action": "shell:exec"}'
 # => {"allow": true, "subject": "openclaw-gateway", "action": "shell:exec"}
 ```
+
+## Web admin console
+
+`agenticiam serve` (and `agenticiam gui`, which is just `serve` plus
+auto-opening a browser) serves a full admin UI at `/` — no separate
+install, it's baked into the same executable and process. First run shows
+a one-time setup screen to create the admin account; after that it's a
+normal login. Everything in the CLI's `identity`/`group`/`role`/`api-key`/
+`audit` commands has a page: identities, group membership, role
+permissions and assignments, API key issuance/revocation, an MCP config
+generator (picks an agent identity, mints an API key, and gives you a
+paste-ready `mcpServers` JSON block), and the audit log.
+
+It's a thin client over the same `/v1/admin/*` REST API described below —
+anything you can do in the browser you can also script against those
+endpoints directly.
 
 ## Integrating with Claude Desktop / Claude Code / Claude Cowork (MCP)
 
@@ -160,7 +189,8 @@ a revocable API key instead of an OAuth token:
 
 ```
 agenticiam init                          bootstrap the directory + admin identity
-agenticiam serve [--host] [--port]       run the REST/OAuth2 server
+agenticiam serve [--host] [--port]       run the REST/OAuth2 server (also serves the web console at /)
+agenticiam gui [--host] [--port] [--no-browser]   serve + auto-open the web console in your browser
 agenticiam mcp                           run the MCP stdio server (reads AGENTICIAM_TOKEN)
 agenticiam whoami --token TOKEN          resolve a token to an identity + scopes
 
@@ -180,14 +210,17 @@ agenticiam audit tail [-n LIMIT]
 
 ```bash
 ./scripts/build.sh
-# -> dist/agenticiam        (Linux/macOS)
-# -> dist/agenticiam.exe    (Windows)
+# -> dist/agenticiam            CLI (console app)                (Linux/macOS)
+# -> dist/agenticiam.exe        CLI (console app)                (Windows)
+# -> dist/agenticiam-gui        GUI (opens a browser, no console) (Linux/macOS)
+# -> dist/agenticiam-gui.exe    GUI (opens a browser, no console) (Windows)
 ```
 
+One `pyinstaller agenticiam.spec` invocation builds both executables.
 PyInstaller doesn't cross-compile — build on the OS you're targeting.
-`.github/workflows/build.yml` builds all three (Linux/Windows/macOS) on
-every push and uploads them as workflow artifacts, if you'd rather not
-build locally on Windows/macOS.
+`.github/workflows/build.yml` builds all three OSes (Linux/Windows/macOS)
+on every push and uploads all four binaries as workflow artifacts, if
+you'd rather not build locally on Windows/macOS.
 
 ## Limitations (v1)
 
@@ -195,10 +228,13 @@ This intentionally does **not** try to be full Active Directory —
 multi-master replication, Kerberos delegation, GPOs, and cross-domain
 trusts are all out of scope. Specifically:
 
-- **No human interactive login / authorization-code OAuth flow, no web
-  admin UI.** Human admins use the CLI (which has trusted local access
-  to the directory file, like running tools on the DC itself) or a
-  CLI-issued bearer token against the REST API.
+- **No OAuth authorization-code flow / SSO federation.** Human login is a
+  plain username+password (`/v1/login`) used by the web console, not a
+  redirect-based OAuth/OIDC flow other identity providers could federate
+  with. Fine for direct use; not a drop-in SSO participant.
+- **First-run setup has no invite/multi-admin flow.** `/v1/setup/bootstrap`
+  creates exactly one initial admin (whoever gets there first); add more
+  admins afterward via the console or CLI.
 - **JWT access tokens aren't individually revocable** before they
   expire (default 1h TTL) — the signing key is only rotatable
   wholesale. Use API keys (`agenticiam api-key issue`) for credentials

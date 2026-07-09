@@ -77,6 +77,18 @@ def mcp():
 
 
 @main.command()
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8765, show_default=True, type=int)
+@click.option("--no-browser", is_flag=True, help="Don't automatically open a browser window.")
+def gui(host, port, no_browser):
+    """Launch the web admin console: starts the server and opens it in your browser."""
+    from .gui import launch_gui
+
+    click.echo(f"AgenticIAM admin console: http://{host}:{port}/")
+    launch_gui(host=host, port=port, open_browser=not no_browser)
+
+
+@main.command()
 @click.option("--token", "token_value", envvar="AGENTICIAM_TOKEN", required=True)
 def whoami(token_value):
     """Show the identity and scopes a token resolves to."""

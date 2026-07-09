@@ -28,12 +28,15 @@ jobs:
           - os: ubuntu-latest
             asset: agenticiam-linux-x64
             bin: agenticiam
+            gui_bin: agenticiam-gui
           - os: windows-latest
             asset: agenticiam-windows-x64
             bin: agenticiam.exe
+            gui_bin: agenticiam-gui.exe
           - os: macos-latest
             asset: agenticiam-macos-arm64
             bin: agenticiam
+            gui_bin: agenticiam-gui
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,3 +49,7 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.bin }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}-gui
+          path: dist/${{ matrix.gui_bin }}

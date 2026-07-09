@@ -82,6 +82,10 @@ def connect(db_file: Path = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_file))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets readers (GUI, CLI) and a writer (server thread) share the file
+    # without "database is locked" errors under normal desktop-tool load.
+    # No-op (and harmless) on ":memory:" databases used in tests.
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 

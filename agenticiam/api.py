@@ -10,11 +10,12 @@ scoped to a single self-hosted directory.
 import base64
 import functools
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 
 from . import audit, db as db_module, directory as directory_module, oauth, paths, policy, tokens
 
 ADMIN_PERMISSION = "iam:admin"
+BOOTSTRAP_ROLE = "domain-admin"
 
 
 def create_app(db_path=None) -> Flask:
@@ -112,6 +113,62 @@ def create_app(db_path=None) -> Flask:
     @app.get("/healthz")
     def healthz():
         return jsonify({"status": "ok"})
+
+    # ------------------------------------------------------------ web admin console
+    @app.get("/")
+    def index():
+        from . import webui
+
+        return Response(webui.PAGE_HTML, mimetype="text/html")
+
+    @app.get("/v1/setup/status")
+    def setup_status():
+        initialized = bool(get_directory().list_identities())
+        return jsonify({"initialized": initialized})
+
+    @app.post("/v1/setup/bootstrap")
+    def setup_bootstrap():
+        directory = get_directory()
+        if directory.list_identities():
+            return jsonify({"error": "already_initialized"}), 409
+        data = request.get_json(force=True)
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+        if not username or len(password) < 8:
+            return (
+                jsonify(
+                    {
+                        "error": "invalid_request",
+                        "error_description": "username is required and password must be at least 8 characters",
+                    }
+                ),
+                400,
+            )
+        try:
+            role = directory.get_role(BOOTSTRAP_ROLE)
+        except directory_module.NotFoundError:
+            role = directory.create_role(BOOTSTRAP_ROLE, "Full directory administrator")
+            directory.grant_permission(role["name"], "*")
+        try:
+            identity = directory.create_identity("user", username, display_name=username, secret=password)
+        except directory_module.ConflictError as exc:
+            return jsonify({"error": str(exc)}), 409
+        directory.assign_role(role["name"], "identity", identity["name"])
+        token_response = oauth.password_login(directory, username, password)
+        return jsonify(token_response), 201
+
+    @app.post("/v1/login")
+    def login():
+        data = _params()
+        username = data.get("username")
+        password = data.get("password")
+        if not username or not password:
+            return jsonify({"error": "invalid_request", "error_description": "username and password required"}), 400
+        try:
+            token_response = oauth.password_login(get_directory(), username, password)
+        except oauth.OAuthError as exc:
+            return jsonify({"error": exc.error, "error_description": exc.description}), exc.status
+        return jsonify(token_response)
 
     # ------------------------------------------------------------ oauth2
     @app.post("/oauth/token")
