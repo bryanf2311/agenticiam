@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from agenticiam import mcp_server
@@ -82,3 +84,48 @@ def test_json_rpc_message_handling(directory, monkeypatch):
     mcp_server._handle_message(directory, None, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                                                    "params": {"name": "does_not_exist", "arguments": {}}})
     assert outputs[3]["error"]["code"] == -32601
+
+
+def test_serve_stdio_handshake_never_touches_disk(monkeypatch):
+    """initialize / tools/list / ping / notifications must be answerable
+    with zero I/O — this is what lets a strict stdio client's handshake
+    timeout (e.g. Goose) succeed even before AGENTICIAM_HOME is writable."""
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("db.connect should not be called before the first tools/call")
+
+    monkeypatch.setattr(mcp_server.db, "connect", fail_if_called)
+    sent = []
+    monkeypatch.setattr(mcp_server, "_send", sent.append)
+
+    lines = [
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+    ]
+    mcp_server.serve_stdio(in_stream=iter(lines))
+
+    assert sent[0]["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+    assert len(sent[1]["result"]["tools"]) == len(mcp_server.TOOL_SCHEMAS)
+    assert sent[2]["result"] == {}
+
+
+def test_serve_stdio_initializes_directory_lazily_on_first_tools_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTICIAM_HOME", str(tmp_path))
+    sent = []
+    monkeypatch.setattr(mcp_server, "_send", sent.append)
+
+    lines = [
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "iam_whoami", "arguments": {}}}
+        ),
+    ]
+    mcp_server.serve_stdio(db_path=tmp_path / "test.db", in_stream=iter(lines))
+
+    assert sent[0]["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+    # no AGENTICIAM_TOKEN set, so the lazily-created principal is None —
+    # the tool call should fail cleanly (isError) rather than crash the loop
+    assert sent[1]["result"]["isError"] is True
+    assert (tmp_path / "test.db").exists()

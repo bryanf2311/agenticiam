@@ -348,15 +348,26 @@ def _handle_message(directory, principal, message):
 
 
 def serve_stdio(db_path=None, in_stream=None):
-    conn = db.connect(db_path or paths.db_path())
-    db.init_schema(conn)
-    directory = directory_module.Directory(conn)
+    # `initialize`, `tools/list`, `ping`, and the `notifications/*` messages
+    # are answered from pure in-memory constants (see _handle_message) and
+    # must never wait on disk I/O — strict MCP clients (e.g. Goose) time out
+    # a process that doesn't respond to `initialize` almost immediately.
+    # So the directory (SQLite connect + schema) and AGENTICIAM_TOKEN
+    # introspection are deferred until the first `tools/call`, which is the
+    # earliest point they're actually needed. The stdio read loop itself
+    # starts with zero setup work ahead of it.
+    lazy = {"directory": None, "principal": None}
 
-    token = os.environ.get("AGENTICIAM_TOKEN")
-    principal = None
-    if token:
-        info = tokens.introspect(token, directory)
-        principal = info if info.get("active") else None
+    def ensure_ready():
+        if lazy["directory"] is not None:
+            return
+        conn = db.connect(db_path or paths.db_path())
+        db.init_schema(conn)
+        lazy["directory"] = directory_module.Directory(conn)
+        token = os.environ.get("AGENTICIAM_TOKEN")
+        if token:
+            info = tokens.introspect(token, lazy["directory"])
+            lazy["principal"] = info if info.get("active") else None
 
     stream = in_stream or sys.stdin
     for line in stream:
@@ -367,4 +378,6 @@ def serve_stdio(db_path=None, in_stream=None):
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
-        _handle_message(directory, principal, message)
+        if message.get("method") == "tools/call":
+            ensure_ready()
+        _handle_message(lazy["directory"], lazy["principal"], message)
