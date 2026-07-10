@@ -1,6 +1,8 @@
+import json
 import sys
 
 import pytest
+import yaml
 
 from agenticiam import api as api_module
 from agenticiam import db as db_module, goose, tokens
@@ -78,22 +80,54 @@ def test_goose_status_requires_admin(client, directory):
     assert resp.status_code == 403
 
 
-def test_goose_models_available(client, admin_headers, monkeypatch):
-    monkeypatch.setattr(goose, "list_ollama_models", lambda: ["llama3.1:8b", "phi4:latest"])
-    resp = client.get("/v1/admin/goose/models", headers=admin_headers)
+def test_goose_models_available_defaults_to_ollama(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(goose, "list_ollama_models", lambda timeout=2.0: ["llama3.1:8b", "phi4:latest"])
+    resp = client.post("/v1/admin/goose/models", json={}, headers=admin_headers)
     body = resp.get_json()
     assert body == {"available": True, "models": ["llama3.1:8b", "phi4:latest"]}
 
 
 def test_goose_models_unavailable(client, admin_headers, monkeypatch):
-    def raise_unavailable():
+    def raise_unavailable(timeout=2.0):
         raise goose.OllamaUnavailable("connection refused")
 
     monkeypatch.setattr(goose, "list_ollama_models", raise_unavailable)
-    resp = client.get("/v1/admin/goose/models", headers=admin_headers)
+    resp = client.post("/v1/admin/goose/models", json={"provider": "ollama"}, headers=admin_headers)
     body = resp.get_json()
     assert body["available"] is False
     assert "connection refused" in body["error"]
+
+
+def test_goose_models_anthropic_requires_api_key(client, admin_headers, monkeypatch):
+    resp = client.post("/v1/admin/goose/models", json={"provider": "anthropic"}, headers=admin_headers)
+    body = resp.get_json()
+    assert body["available"] is False
+    assert "API key" in body["error"]
+
+
+def test_goose_models_anthropic_with_key(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(
+        goose, "list_anthropic_models", lambda api_key, timeout=5.0: ["claude-opus-4-8", "claude-sonnet-5"]
+    )
+    resp = client.post(
+        "/v1/admin/goose/models", json={"provider": "anthropic", "api_key": "sk-ant-fake"}, headers=admin_headers
+    )
+    body = resp.get_json()
+    assert body == {"available": True, "models": ["claude-opus-4-8", "claude-sonnet-5"]}
+
+
+def test_goose_models_google_with_key(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(goose, "list_google_models", lambda api_key, timeout=5.0: ["gemini-3-pro"])
+    resp = client.post(
+        "/v1/admin/goose/models", json={"provider": "google", "api_key": "fake-key"}, headers=admin_headers
+    )
+    body = resp.get_json()
+    assert body == {"available": True, "models": ["gemini-3-pro"]}
+
+
+def test_goose_models_unknown_provider(client, admin_headers):
+    resp = client.post("/v1/admin/goose/models", json={"provider": "not-a-real-provider"}, headers=admin_headers)
+    assert resp.status_code == 400
 
 
 def test_create_goose_agent_end_to_end(client, admin_headers, goose_config_path):
@@ -149,6 +183,77 @@ def test_create_goose_agent_set_as_default(client, admin_headers, goose_config_p
     # the model is already the global default now, so no env-var override needed
     commands = resp.get_json()["launch_commands"]
     assert commands["bash"] == "goose session -n bot2"
+
+
+def test_create_goose_agent_with_anthropic_key_never_persisted(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "claude-bot",
+            "permissions": [],
+            "provider": "anthropic",
+            "model": "claude-sonnet-5",
+            "api_key": "sk-ant-super-secret",
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    # the key must appear ONLY in the one-time launch command response...
+    assert "sk-ant-super-secret" in body["launch_commands"]["bash"]
+
+    # ...and nowhere else: not in goose's config.yaml...
+    written = goose.load_config()
+    assert "sk-ant-super-secret" not in yaml.safe_dump(written)
+
+    # ...and not anywhere in AgenticIAM's own directory/audit trail
+    audit_entries = client.get("/v1/admin/audit?limit=50", headers=admin_headers).get_json()
+    assert not any("sk-ant-super-secret" in json.dumps(e) for e in audit_entries)
+    identities = client.get("/v1/admin/identities", headers=admin_headers).get_json()
+    assert not any("sk-ant-super-secret" in json.dumps(i) for i in identities)
+
+
+def test_create_goose_agent_context_limit_set_as_default(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "bot5",
+            "permissions": [],
+            "model": "llama3.1:8b",
+            "context_limit": 32000,
+            "set_as_default": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    written = goose.load_config()
+    assert written["GOOSE_CONTEXT_LIMIT"] == 32000
+    assert written["GOOSE_INPUT_LIMIT"] == 32000
+    commands = resp.get_json()["launch_commands"]
+    assert commands["bash"] == "goose session -n bot5"  # already the default, no override needed
+
+
+def test_create_goose_agent_context_limit_not_default_uses_env_override(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "bot6", "permissions": [], "model": "llama3.1:8b", "context_limit": 32000},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    written = goose.load_config()
+    assert "GOOSE_CONTEXT_LIMIT" not in written
+    commands = resp.get_json()["launch_commands"]
+    assert "GOOSE_CONTEXT_LIMIT=32000" in commands["bash"]
+    assert "GOOSE_INPUT_LIMIT=32000" in commands["bash"]
+
+
+def test_create_goose_agent_invalid_context_limit(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "bot7", "permissions": [], "context_limit": "not-a-number"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
 
 
 def test_create_goose_agent_preserves_existing_config(client, admin_headers, goose_config_path):

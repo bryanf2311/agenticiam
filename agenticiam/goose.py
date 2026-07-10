@@ -21,15 +21,30 @@ import re
 import shutil
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 import yaml
 
 OLLAMA_API_BASE = "http://127.0.0.1:11434"
+ANTHROPIC_API_BASE = "https://api.anthropic.com"
+GOOGLE_API_BASE = "https://generativelanguage.googleapis.com"
+
+# Confirmed against block/goose's actual provider source (anthropic_def.rs,
+# google_def.rs) and its provider docs table — not guessed. Note Gemini's
+# env var is GOOGLE_API_KEY, not GEMINI_API_KEY, despite the product name.
+PROVIDER_API_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+}
 
 
-class OllamaUnavailable(Exception):
+class ProviderUnavailable(Exception):
+    pass
+
+
+class OllamaUnavailable(ProviderUnavailable):
     pass
 
 
@@ -48,6 +63,50 @@ def list_ollama_models(timeout: float = 2.0) -> list:
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise OllamaUnavailable(str(exc)) from exc
     return sorted(m["name"] for m in data.get("models", []) if m.get("name"))
+
+
+def list_anthropic_models(api_key: str, timeout: float = 5.0) -> list:
+    if not api_key:
+        raise ProviderUnavailable("an Anthropic API key is required to list models")
+    req = urllib.request.Request(
+        f"{ANTHROPIC_API_BASE}/v1/models",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ProviderUnavailable(str(exc)) from exc
+    return sorted(m["id"] for m in data.get("data", []) if m.get("id"))
+
+
+def list_google_models(api_key: str, timeout: float = 5.0) -> list:
+    if not api_key:
+        raise ProviderUnavailable("a Google API key is required to list models")
+    url = f"{GOOGLE_API_BASE}/v1beta/models?key={urllib.parse.quote(api_key)}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ProviderUnavailable(str(exc)) from exc
+    names = []
+    for m in data.get("models", []):
+        name = m.get("name", "")
+        if name.startswith("models/"):
+            name = name[len("models/"):]
+        if name:
+            names.append(name)
+    return sorted(names)
+
+
+def list_provider_models(provider: str, api_key: str = None, timeout: float = 5.0) -> list:
+    if provider == "ollama":
+        return list_ollama_models(timeout=timeout)
+    if provider == "anthropic":
+        return list_anthropic_models(api_key, timeout=timeout)
+    if provider == "google":
+        return list_google_models(api_key, timeout=timeout)
+    raise ValueError(f"unknown provider {provider!r}")
 
 
 def _config_path_for(is_windows: bool, environ: dict) -> Path:
@@ -110,34 +169,72 @@ def register_extension(
     return config
 
 
-def set_default_provider_model(config: dict, provider: str, model: str) -> dict:
+def set_default_provider_model(config: dict, provider: str, model: str, context_limit: int = None) -> dict:
     config = dict(config)
     config["GOOSE_PROVIDER"] = provider
     config["GOOSE_MODEL"] = model
+    if context_limit:
+        config["GOOSE_CONTEXT_LIMIT"] = context_limit
+        if provider == "ollama":
+            # GOOSE_CONTEXT_LIMIT is goose's own context-management threshold;
+            # GOOSE_INPUT_LIMIT is the one that actually reaches Ollama's
+            # num_ctx, so both need setting to really change the window.
+            config["GOOSE_INPUT_LIMIT"] = context_limit
     return config
 
 
-def launch_commands(name: str, provider: str = None, model: str = None) -> dict:
+def launch_commands(
+    name: str, provider: str = None, model: str = None, context_limit: int = None, api_key: str = None
+) -> dict:
     """Shell-specific commands to start an interactive Goose session for
     this agent.
 
     `goose session` has no --provider/--model flags (only `goose run`
     does — confirmed against a real Goose install after an earlier
     version of this wizard generated `session --provider ... --model
-    ...` and it rejected them outright). GOOSE_PROVIDER/GOOSE_MODEL are
-    documented as readable from the environment as well as config.yaml,
-    so a per-invocation override goes through env vars instead — whose
-    syntax differs enough across shells that we hand back all three
-    rather than guess which one the user is in.
+    ...` and it rejected them outright). GOOSE_PROVIDER/GOOSE_MODEL/
+    GOOSE_CONTEXT_LIMIT/provider API keys are all documented as readable
+    from the environment as well as config.yaml, so a per-invocation
+    override goes through env vars instead — whose syntax differs enough
+    across shells that we hand back all three rather than guess which one
+    the user is in.
+
+    The provider API key (if any) is never written to config.yaml or
+    persisted anywhere by AgenticIAM — Goose's own docs warn against
+    keeping API keys in plaintext config files, preferring env vars or its
+    OS-keyring-backed secret store. It only ever exists in this one-time
+    generated command.
     """
     base = f"goose session -n {name}"
-    if not model:
+    bash_parts, ps_parts, cmd_parts = [], [], []
+
+    def add(key, value, quote=False):
+        if quote:
+            bash_parts.append(f"{key}='{value}'")
+            ps_parts.append(f"$env:{key}='{value}'")
+        else:
+            bash_parts.append(f"{key}={value}")
+            ps_parts.append(f'$env:{key}="{value}"')
+        cmd_parts.append(f'set "{key}={value}"')
+
+    if model:
+        provider = provider or "ollama"
+        add("GOOSE_PROVIDER", provider)
+        add("GOOSE_MODEL", model)
+    if context_limit:
+        add("GOOSE_CONTEXT_LIMIT", context_limit)
+        if (provider or "ollama") == "ollama":
+            add("GOOSE_INPUT_LIMIT", context_limit)
+    key_env = PROVIDER_API_KEY_ENV.get(provider)
+    if key_env and api_key:
+        add(key_env, api_key, quote=True)
+
+    if not bash_parts:
         return {"bash": base, "powershell": base, "cmd": base}
-    provider = provider or "ollama"
     return {
-        "bash": f"GOOSE_PROVIDER={provider} GOOSE_MODEL={model} {base}",
-        "powershell": f'$env:GOOSE_PROVIDER="{provider}"; $env:GOOSE_MODEL="{model}"; {base}',
-        "cmd": f'set "GOOSE_PROVIDER={provider}" && set "GOOSE_MODEL={model}" && {base}',
+        "bash": " ".join(bash_parts) + f" {base}",
+        "powershell": "; ".join(ps_parts) + f"; {base}",
+        "cmd": " && ".join(cmd_parts) + f" && {base}",
     }
 
 

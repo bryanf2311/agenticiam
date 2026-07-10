@@ -462,13 +462,18 @@ def create_app(db_path=None) -> Flask:
             }
         )
 
-    @app.get("/v1/admin/goose/models")
+    @app.post("/v1/admin/goose/models")
     @require_permission(ADMIN_PERMISSION)
     def goose_models():
+        data = request.get_json(silent=True) or {}
+        provider = (data.get("provider") or "ollama").strip()
+        api_key = data.get("api_key") or None
         try:
-            models = goose.list_ollama_models()
-        except goose.OllamaUnavailable as exc:
+            models = goose.list_provider_models(provider, api_key=api_key)
+        except goose.ProviderUnavailable as exc:
             return jsonify({"available": False, "models": [], "error": str(exc)})
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "error_description": str(exc)}), 400
         return jsonify({"available": True, "models": models})
 
     @app.post("/v1/admin/goose/agents")
@@ -481,6 +486,15 @@ def create_app(db_path=None) -> Flask:
         permissions = [p.strip() for p in (data.get("permissions") or []) if p and p.strip()]
         model = (data.get("model") or "").strip() or None
         provider = (data.get("provider") or "ollama").strip()
+        # api_key is used only to build the launch command below — it is
+        # never written to config.yaml or stored in the directory, matching
+        # Goose's own guidance against keeping provider keys in plaintext files.
+        api_key = data.get("api_key") or None
+        context_limit = data.get("context_limit")
+        try:
+            context_limit = int(context_limit) if context_limit else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_request", "error_description": "context_limit must be an integer"}), 400
         set_as_default = bool(data.get("set_as_default"))
         cmd = data.get("cmd")
         args = data.get("args")
@@ -507,9 +521,15 @@ def create_app(db_path=None) -> Flask:
             return jsonify({"error": str(exc)}), 400
 
         extension_id = goose.slugify(name)
-        # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL into config.yaml,
-        # a per-invocation env override would just be redundant — show the plain command
-        launch_commands = goose.launch_commands(name, provider, None if set_as_default else model)
+        # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL/GOOSE_CONTEXT_LIMIT into
+        # config.yaml, a per-invocation env override would just be redundant
+        launch_commands = goose.launch_commands(
+            name,
+            provider,
+            None if set_as_default else model,
+            context_limit=None if set_as_default else context_limit,
+            api_key=api_key,
+        )
 
         result = {
             "identity": identity,
@@ -525,7 +545,7 @@ def create_app(db_path=None) -> Flask:
             cfg = goose.load_config()
             cfg = goose.register_extension(cfg, extension_id, name, cmd, args, key["key"])
             if set_as_default and model:
-                cfg = goose.set_default_provider_model(cfg, provider, model)
+                cfg = goose.set_default_provider_model(cfg, provider, model, context_limit=context_limit)
             written_path = goose.save_config(cfg)
             result["goose_config_written"] = True
             result["config_path"] = str(written_path)
@@ -538,7 +558,8 @@ def create_app(db_path=None) -> Flask:
             directory.conn, "goose.create_agent",
             "success" if result.get("goose_config_written") else "partial",
             actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
-            resource=f"identity:{name}", detail={"model": model, "permissions": permissions},
+            resource=f"identity:{name}",
+            detail={"provider": provider, "model": model, "permissions": permissions, "context_limit": context_limit},
         )
         return jsonify(result), 201
 

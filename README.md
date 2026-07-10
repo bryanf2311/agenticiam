@@ -132,26 +132,35 @@ It's a thin client over the same `/v1/admin/*` REST API described below —
 anything you can do in the browser you can also script against those
 endpoints directly.
 
-## New Agent wizard (Goose + Ollama)
+## New Agent wizard (Goose + Ollama/Anthropic/Google)
 
 The **+ New Agent** button in the web console is a 4-step wizard that goes
-from nothing to a running, permissioned local AI agent:
+from nothing to a running, permissioned AI agent:
 
 1. **Checks prerequisites** — is [Goose](https://block.github.io/goose/)
-   on `PATH`, is [Ollama](https://ollama.com) reachable at
-   `127.0.0.1:11434`.
-2. **Name & model** — pick a name and an installed Ollama model (fetched
-   live from Ollama's local API).
+   on `PATH`. Ollama is checked too but only needed if you pick it as a
+   provider in the next step.
+2. **Name, provider & model** — pick a name, then a provider:
+   - **Ollama** (local, free) — models are listed live from Ollama's local API.
+   - **Anthropic** (Claude) or **Google** (Gemini) — paste an API key and
+     click "Load models" to fetch the live list from that provider's own
+     API (`api.anthropic.com/v1/models` / `generativelanguage.googleapis.com`).
+     **The key is never stored by AgenticIAM** — not in its database, not
+     in Goose's `config.yaml`. It only ever appears once, embedded in the
+     launch command shown in the final step, matching Goose's own guidance
+     against keeping provider API keys in plaintext config files (it
+     expects them via env var or its OS-keyring-backed secret store).
 3. **Permissions** — check off common scopes (`shell:exec`, `files:read`,
    `files:write`, `browser:control`, `email:send`) or type custom ones;
    this becomes a role scoped to just this agent.
-4. **Review & create** — on confirm, it creates the agent identity, role,
-   and permission grants (same directory primitives as everything else in
-   this doc), mints an API key, and registers an `extensions` entry in
-   Goose's `config.yaml` with that key embedded in `envs.AGENTICIAM_TOKEN`
-   — never as a shell string, so it never shows up in a process listing.
-   You get back a ready-to-paste `goose session -n <name>` command to
-   start chatting, in bash/PowerShell/cmd variants.
+4. **Review & create** — set an optional context window (tokens), then on
+   confirm it creates the agent identity, role, and permission grants
+   (same directory primitives as everything else in this doc), mints an
+   API key, and registers an `extensions` entry in Goose's `config.yaml`
+   with *that* key (AgenticIAM's own, revocable, low-stakes one) embedded
+   in `envs.AGENTICIAM_TOKEN` — never as a shell string, so it never shows
+   up in a process listing. You get back a ready-to-paste `goose session
+   -n <name>` command to start chatting, in bash/PowerShell/cmd variants.
 
 Two things worth knowing:
 
@@ -162,15 +171,20 @@ Two things worth knowing:
   and writing to the server's machine, not yours.
 - **Goose has no per-agent model profile, and `goose session` takes no
   `--provider`/`--model` flags** (only `goose run` does — verified
-  against a real install, not just docs). `GOOSE_PROVIDER`/`GOOSE_MODEL`
-  are global settings in config.yaml, read from the environment too. So
-  by default the wizard leaves your global provider/model alone and hands
-  you a launch command that sets `GOOSE_PROVIDER`/`GOOSE_MODEL` as
-  environment variables for just that one invocation. Checking "set as
-  Goose's default" in step 4 writes them into config.yaml instead — that
-  affects every future `goose session`, not just this agent, and the
-  launch command becomes the plain `goose session -n <name>` since the
-  override is no longer needed.
+  against a real install, not just docs). `GOOSE_PROVIDER`/`GOOSE_MODEL`/
+  `GOOSE_CONTEXT_LIMIT` (context window, tokens) are global settings in
+  config.yaml, all readable from the environment too. So by default the
+  wizard leaves your global settings alone and hands you a launch command
+  that sets them as environment variables for just that one invocation —
+  along with the provider's API key env var (`ANTHROPIC_API_KEY` /
+  `GOOGLE_API_KEY`) when applicable, and `GOOSE_INPUT_LIMIT` alongside
+  `GOOSE_CONTEXT_LIMIT` for Ollama specifically, since that's the setting
+  that actually reaches Ollama's `num_ctx`. Checking "set as Goose's
+  default" in step 4 writes provider/model/context into config.yaml
+  instead — that affects every future `goose session`, not just this
+  agent, and the launch command drops those env vars since they're no
+  longer needed (the API key env var, if any, always still appears in the
+  command — it's never written to config.yaml regardless).
 - If writing `config.yaml` fails (permissions, read-only filesystem, ...)
   the agent identity/role/key are still created — you just get the raw
   YAML `extensions` snippet to paste in by hand instead of losing the

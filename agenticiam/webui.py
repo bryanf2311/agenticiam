@@ -239,7 +239,8 @@ let wizardState = {};
 function resetWizard() {
   wizardStep = 1;
   wizardState = {
-    status: null, name: '', model: '', permissions: [], customPermissions: '',
+    status: null, name: '', provider: 'ollama', model: '', apiKey: '',
+    contextLimit: '', permissions: [], customPermissions: '',
     setDefault: false, cmd: '', args: '', result: null,
   };
 }
@@ -250,6 +251,12 @@ const WIZARD_COMMON_PERMISSIONS = [
   ['files:write', 'Write/modify files'],
   ['browser:control', 'Control a browser'],
   ['email:send', 'Send email'],
+];
+
+const WIZARD_PROVIDERS = [
+  ['ollama', 'Ollama (local, free)'],
+  ['anthropic', 'Anthropic (Claude — API key)'],
+  ['google', 'Google (Gemini — API key)'],
 ];
 
 async function renderWizard() {
@@ -268,17 +275,17 @@ async function renderWizardStep1() {
     wizardState.status = await api('/v1/admin/goose/status');
   } catch (err) { body.innerHTML = errBox(err); return; }
   const s = wizardState.status;
-  const ready = s.goose_installed && s.ollama_reachable;
+  const ready = s.goose_installed;
   body.innerHTML = `
     <div class="panel">
       <h3>Step 1 of 4 — Check prerequisites</h3>
-      <p class="hint">This configures <strong>Goose</strong> on this machine to use an Ollama model with a new AgenticIAM agent identity wired in as an MCP tool — permissions and all.</p>
+      <p class="hint">This configures <strong>Goose</strong> on this machine with a new AgenticIAM agent identity wired in as an MCP tool — permissions and all. You'll pick a model provider next.</p>
       <table><tbody>
         <tr><td>Goose CLI</td><td>${s.goose_installed ? '<span class="badge on">found</span> <span class="hint mono">' + esc(s.goose_path) + '</span>' : '<span class="badge off">not found</span>'}</td></tr>
-        <tr><td>Ollama</td><td>${s.ollama_reachable ? '<span class="badge on">running</span>' : (s.ollama_installed ? '<span class="badge off">installed, not running</span>' : '<span class="badge off">not found</span>')}</td></tr>
+        <tr><td>Ollama <span class="hint">(only needed for local models)</span></td><td>${s.ollama_reachable ? '<span class="badge on">running</span>' : (s.ollama_installed ? '<span class="badge off">installed, not running</span>' : '<span class="badge off">not found</span>')}</td></tr>
       </tbody></table>
       ${!s.goose_installed ? '<p class="hint">Install Goose: <a href="https://block.github.io/goose/docs/getting-started/installation" target="_blank" rel="noopener">block.github.io/goose</a></p>' : ''}
-      ${!s.ollama_reachable ? '<p class="hint">Install/start Ollama: <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>, then run <span class="mono">ollama serve</span> and pull a model, e.g. <span class="mono">ollama pull llama3.1</span>.</p>' : ''}
+      ${!s.ollama_reachable ? '<p class="hint">Want a local model instead of a cloud API key? Install/start Ollama: <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>, then run <span class="mono">ollama serve</span> and pull a model, e.g. <span class="mono">ollama pull llama3.1</span>.</p>' : ''}
       <p class="hint">Goose config will be written to <span class="mono">${esc(s.config_path)}</span> (a backup of any existing file is kept alongside it).</p>
       <div class="submit-row row">
         <button class="secondary" id="wiz-recheck">Re-check</button>
@@ -291,34 +298,77 @@ async function renderWizardStep1() {
 
 async function renderWizardStep2() {
   const body = document.getElementById('wizard-body');
-  body.innerHTML = 'Loading models…';
-  let models = [];
-  let modelErr = null;
-  try {
-    const res = await api('/v1/admin/goose/models');
-    if (res.available) models = res.models; else modelErr = res.error || 'Ollama unavailable';
-  } catch (err) { modelErr = err.message; }
+  const isCloud = wizardState.provider !== 'ollama';
   body.innerHTML = `
     <div class="panel">
-      <h3>Step 2 of 4 — Name & model</h3>
+      <h3>Step 2 of 4 — Name, provider & model</h3>
       <label>Agent name</label>
       <input id="wiz-name" value="${esc(wizardState.name)}" placeholder="research-bot">
-      <label>Ollama model</label>
-      ${models.length
-        ? `<select id="wiz-model">${models.map(m => `<option value="${esc(m)}" ${m === wizardState.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`
-        : `<div class="err">${esc(modelErr || 'No models found — pull one with `ollama pull llama3.1`.')}</div>`}
+      <label>Provider</label>
+      <select id="wiz-provider">
+        ${WIZARD_PROVIDERS.map(([id, label]) => `<option value="${id}" ${id === wizardState.provider ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+      </select>
+      <div id="wiz-key-row" style="display:${isCloud ? 'block' : 'none'}">
+        <label>API key</label>
+        <div class="row">
+          <input id="wiz-api-key" type="password" value="${esc(wizardState.apiKey)}" style="flex:1" placeholder="paste your key">
+          <button class="secondary" type="button" id="wiz-load-models">Load models</button>
+        </div>
+        <p class="hint">Used only to build the launch command in step 4 — AgenticIAM never stores this key anywhere (not in Goose's config.yaml, not in its own database).</p>
+      </div>
+      <label>Model</label>
+      <div id="wiz-model-wrap">${isCloud ? '<span class="hint">Enter your API key above and click "Load models".</span>' : 'Loading…'}</div>
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
-        <button id="wiz-next" ${models.length ? '' : 'disabled'}>Next</button>
+        <button id="wiz-next" disabled>Next</button>
       </div>
     </div>`;
-  document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 1; renderWizard(); });
+
+  document.getElementById('wiz-back').addEventListener('click', () => {
+    wizardState.name = document.getElementById('wiz-name').value.trim();
+    wizardStep = 1; renderWizard();
+  });
+  document.getElementById('wiz-provider').addEventListener('change', (e) => {
+    wizardState.name = document.getElementById('wiz-name').value.trim();
+    wizardState.provider = e.target.value;
+    wizardState.model = '';
+    renderWizardStep2();
+  });
+
+  async function loadModels() {
+    const wrap = document.getElementById('wiz-model-wrap');
+    const nextBtn = document.getElementById('wiz-next');
+    wrap.innerHTML = 'Loading…';
+    nextBtn.disabled = true;
+    const provider = document.getElementById('wiz-provider').value;
+    const apiKeyInput = document.getElementById('wiz-api-key');
+    const apiKey = apiKeyInput ? apiKeyInput.value : '';
+    try {
+      const res = await api('/v1/admin/goose/models', { method: 'POST', json: { provider, api_key: apiKey || undefined } });
+      if (res.available && res.models.length) {
+        wrap.innerHTML = `<select id="wiz-model">${res.models.map(m => `<option value="${esc(m)}" ${m === wizardState.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`;
+        nextBtn.disabled = false;
+      } else {
+        wrap.innerHTML = `<div class="err">${esc(res.error || 'No models found')}</div>`;
+      }
+    } catch (err) { wrap.innerHTML = errBox(err); }
+  }
+
+  if (isCloud) {
+    document.getElementById('wiz-load-models').addEventListener('click', loadModels);
+  } else {
+    loadModels();
+  }
+
   document.getElementById('wiz-next').addEventListener('click', () => {
     const nameInput = document.getElementById('wiz-name').value.trim();
     if (!nameInput) { alert('Please enter a name.'); return; }
     wizardState.name = nameInput;
+    wizardState.provider = document.getElementById('wiz-provider').value;
     const modelSel = document.getElementById('wiz-model');
     wizardState.model = modelSel ? modelSel.value : '';
+    const apiKeyInput = document.getElementById('wiz-api-key');
+    wizardState.apiKey = apiKeyInput ? apiKeyInput.value : '';
     wizardStep = 3; renderWizard();
   });
 }
@@ -355,22 +405,26 @@ function renderWizardStep4() {
   if (!wizardState.cmd) wizardState.cmd = s.suggested_cmd || 'agenticiam';
   if (!wizardState.args) wizardState.args = (s.suggested_args || ['mcp']).join(' ');
   const allPerms = wizardState.permissions.concat((wizardState.customPermissions || '').split(/\\s+/).filter(Boolean));
+  const providerLabel = (WIZARD_PROVIDERS.find(([id]) => id === wizardState.provider) || [wizardState.provider, wizardState.provider])[1];
   body.innerHTML = `
     <div class="panel">
       <h3>Step 4 of 4 — Review & create</h3>
       <table><tbody>
         <tr><td>Name</td><td>${esc(wizardState.name)}</td></tr>
-        <tr><td>Model</td><td>${esc(wizardState.model)} <span class="hint">(ollama)</span></td></tr>
+        <tr><td>Provider</td><td>${esc(providerLabel)}</td></tr>
+        <tr><td>Model</td><td>${esc(wizardState.model)}</td></tr>
         <tr><td>Permissions</td><td class="mono">${esc(allPerms.join(', ') || '(none)')}</td></tr>
         <tr><td>Goose config</td><td class="mono">${esc(s.config_path || '')}</td></tr>
       </tbody></table>
+      <label>Context window (tokens, optional — leave blank for the model's default)</label>
+      <input id="wiz-context-limit" type="number" min="1" value="${esc(wizardState.contextLimit)}" placeholder="e.g. 32000">
       <label>Command Goose should run for this agent's MCP tools</label>
       <input id="wiz-cmd" value="${esc(wizardState.cmd)}">
       <label>Arguments (space-separated)</label>
       <input id="wiz-args" value="${esc(wizardState.args)}">
       <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
         <input type="checkbox" id="wiz-default" ${wizardState.setDefault ? 'checked' : ''} style="width:auto">
-        <span>Also set this as Goose's default provider/model (affects <em>all</em> Goose sessions, not just this agent)</span>
+        <span>Also set this as Goose's default provider/model/context window (affects <em>all</em> Goose sessions, not just this agent)</span>
       </label>
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
@@ -378,18 +432,24 @@ function renderWizardStep4() {
       </div>
       <div id="wiz-create-msg"></div>
     </div>`;
-  document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 3; renderWizard(); });
+  document.getElementById('wiz-back').addEventListener('click', () => {
+    wizardState.contextLimit = document.getElementById('wiz-context-limit').value.trim();
+    wizardStep = 3; renderWizard();
+  });
   document.getElementById('wiz-create').addEventListener('click', async () => {
     wizardState.cmd = document.getElementById('wiz-cmd').value.trim();
     wizardState.args = document.getElementById('wiz-args').value.trim();
     wizardState.setDefault = document.getElementById('wiz-default').checked;
+    wizardState.contextLimit = document.getElementById('wiz-context-limit').value.trim();
     const msg = document.getElementById('wiz-create-msg');
     msg.innerHTML = 'Creating…';
     try {
       const res = await api('/v1/admin/goose/agents', { method: 'POST', json: {
         name: wizardState.name,
         model: wizardState.model,
-        provider: 'ollama',
+        provider: wizardState.provider,
+        api_key: wizardState.apiKey || undefined,
+        context_limit: wizardState.contextLimit ? parseInt(wizardState.contextLimit, 10) : undefined,
         permissions: allPerms,
         set_as_default: wizardState.setDefault,
         cmd: wizardState.cmd,

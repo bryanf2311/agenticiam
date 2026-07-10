@@ -117,3 +117,116 @@ def fake_ollama_server(monkeypatch):
 def test_list_ollama_models_happy_path(fake_ollama_server):
     models = goose.list_ollama_models()
     assert models == ["llama3.1:8b", "phi4:latest"]
+
+
+def test_list_anthropic_models_requires_key():
+    with pytest.raises(goose.ProviderUnavailable):
+        goose.list_anthropic_models(None)
+
+
+def test_list_anthropic_models_parses_response(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "claude-sonnet-5"}, {"id": "claude-opus-4-8"}]}).encode()
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = dict(req.header_items())
+        captured["url"] = req.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr(goose.urllib.request, "urlopen", fake_urlopen)
+    models = goose.list_anthropic_models("sk-ant-fake")
+    assert models == ["claude-opus-4-8", "claude-sonnet-5"]
+    assert captured["headers"]["X-api-key"] == "sk-ant-fake"
+
+
+def test_list_google_models_requires_key():
+    with pytest.raises(goose.ProviderUnavailable):
+        goose.list_google_models(None)
+
+
+def test_list_google_models_parses_response(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"models": [{"name": "models/gemini-3-pro"}, {"name": "models/gemini-3-flash"}]}).encode()
+
+    monkeypatch.setattr(goose.urllib.request, "urlopen", lambda url, timeout=None: FakeResponse())
+    models = goose.list_google_models("fake-key")
+    assert models == ["gemini-3-flash", "gemini-3-pro"]
+
+
+def test_list_provider_models_dispatches(monkeypatch):
+    monkeypatch.setattr(goose, "list_ollama_models", lambda timeout=2.0: ["a"])
+    monkeypatch.setattr(goose, "list_anthropic_models", lambda api_key, timeout=5.0: ["b"])
+    monkeypatch.setattr(goose, "list_google_models", lambda api_key, timeout=5.0: ["c"])
+    assert goose.list_provider_models("ollama") == ["a"]
+    assert goose.list_provider_models("anthropic", api_key="k") == ["b"]
+    assert goose.list_provider_models("google", api_key="k") == ["c"]
+    with pytest.raises(ValueError):
+        goose.list_provider_models("nonsense")
+
+
+def test_launch_commands_no_overrides():
+    commands = goose.launch_commands("bot")
+    assert commands["bash"] == "goose session -n bot"
+    assert commands["powershell"] == "goose session -n bot"
+    assert commands["cmd"] == "goose session -n bot"
+
+
+def test_launch_commands_with_model():
+    commands = goose.launch_commands("bot", "ollama", "llama3.1:8b")
+    assert commands["bash"] == "GOOSE_PROVIDER=ollama GOOSE_MODEL=llama3.1:8b goose session -n bot"
+    assert commands["powershell"] == '$env:GOOSE_PROVIDER="ollama"; $env:GOOSE_MODEL="llama3.1:8b"; goose session -n bot'
+    assert commands["cmd"] == 'set "GOOSE_PROVIDER=ollama" && set "GOOSE_MODEL=llama3.1:8b" && goose session -n bot'
+
+
+def test_launch_commands_context_limit_ollama_sets_both_vars():
+    commands = goose.launch_commands("bot", "ollama", "llama3.1:8b", context_limit=32000)
+    assert "GOOSE_CONTEXT_LIMIT=32000" in commands["bash"]
+    assert "GOOSE_INPUT_LIMIT=32000" in commands["bash"]
+
+
+def test_launch_commands_context_limit_non_ollama_skips_input_limit():
+    commands = goose.launch_commands("bot", "anthropic", "claude-sonnet-5", context_limit=32000)
+    assert "GOOSE_CONTEXT_LIMIT=32000" in commands["bash"]
+    assert "GOOSE_INPUT_LIMIT" not in commands["bash"]
+
+
+def test_launch_commands_api_key_is_quoted_and_never_bare():
+    commands = goose.launch_commands("bot", "anthropic", "claude-sonnet-5", api_key="sk-ant-secret")
+    assert "ANTHROPIC_API_KEY='sk-ant-secret'" in commands["bash"]
+    assert "$env:ANTHROPIC_API_KEY='sk-ant-secret'" in commands["powershell"]
+    assert 'set "ANTHROPIC_API_KEY=sk-ant-secret"' in commands["cmd"]
+
+
+def test_launch_commands_ollama_ignores_api_key():
+    # ollama has no PROVIDER_API_KEY_ENV entry, so a stray key must never appear
+    commands = goose.launch_commands("bot", "ollama", "llama3.1:8b", api_key="should-not-appear")
+    for variant in commands.values():
+        assert "should-not-appear" not in variant
+
+
+def test_set_default_provider_model_with_context_limit_ollama():
+    result = goose.set_default_provider_model({}, "ollama", "llama3.1:8b", context_limit=16000)
+    assert result["GOOSE_CONTEXT_LIMIT"] == 16000
+    assert result["GOOSE_INPUT_LIMIT"] == 16000
+
+
+def test_set_default_provider_model_with_context_limit_non_ollama():
+    result = goose.set_default_provider_model({}, "anthropic", "claude-sonnet-5", context_limit=16000)
+    assert result["GOOSE_CONTEXT_LIMIT"] == 16000
+    assert "GOOSE_INPUT_LIMIT" not in result
