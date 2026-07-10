@@ -299,6 +299,28 @@ AgenticIAM's code controls (it's how Goose loads extensions), so there's
 no code fix for it here yet, but it's worth knowing about if 300s still
 isn't enough on modest hardware with several registered agents.
 
+Two more things fixed after real-world testing, both Windows-specific:
+
+- **`agenticiam-gui.exe mcp` used to crash with `OSError: [Errno 22]
+  Invalid argument`** if the parent Goose session was closed while it
+  still had something to say (e.g. you closed the console mid-dispatch).
+  Writing to a stdio pipe the other end already closed is a normal
+  end-of-session condition, not a bug — it now exits silently (exit code
+  0, no traceback) instead. This uses `os._exit()` rather than a plain
+  `sys.exit()`: the latter still lets Python's normal shutdown sequence
+  try to flush stdout one more time, which hits the *same* broken pipe
+  and makes CPython override the exit code to its own hardcoded 120
+  regardless of what was requested — `os._exit()` skips that shutdown
+  sequence entirely.
+- **A dispatch call used to pop up a visible, empty console window** on
+  Windows. `agenticiam-gui.exe` has no console of its own (it's a
+  windowed-subsystem app), so when it spawns `goose run` as a child
+  process, Windows allocates one — independent of `stdout`/`stderr`
+  already being captured via pipes for the dispatch response. Dispatch
+  now passes `CREATE_NO_WINDOW` on Windows so it runs fully in the
+  background, matching what "the manager gets the text response back"
+  was always supposed to feel like.
+
 ## Integrating with Claude Desktop / Claude Code / Claude Cowork (MCP)
 
 Issue a token for whichever identity the session should act as, then point

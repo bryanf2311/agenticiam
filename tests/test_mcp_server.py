@@ -239,3 +239,61 @@ def test_serve_stdio_initializes_directory_lazily_on_first_tools_call(tmp_path, 
     # the tool call should fail cleanly (isError) rather than crash the loop
     assert sent[1]["result"]["isError"] is True
     assert (tmp_path / "test.db").exists()
+
+
+@pytest.fixture
+def fake_os_exit(monkeypatch):
+    """os._exit() terminates the process immediately with no exception to
+    catch — calling the real one inside a test would kill the pytest
+    process itself. Replace it with something that raises a distinguishable,
+    catchable marker instead, so we can assert it was reached with the
+    right code without actually exiting."""
+    calls = []
+
+    def fake(code):
+        calls.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(mcp_server.os, "_exit", fake)
+    return calls
+
+
+def test_send_exits_cleanly_on_broken_pipe(monkeypatch, fake_os_exit):
+    """Reproduces a real crash: writing to stdout after the parent (Goose)
+    already closed its end of the pipe used to surface as an unhandled
+    OSError: [Errno 22] Invalid argument on Windows. It should exit
+    quietly instead — via os._exit(), not sys.exit(), since a plain
+    sys.exit() still lets Python's shutdown sequence try (and re-fail) one
+    more stdout flush, which overrides the exit code to CPython's
+    hardcoded 120 and prints its own "Exception ignored" noise — verified
+    against both the frozen exe and plain `python -m agenticiam mcp`."""
+    def fail_write(*args, **kwargs):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(mcp_server.sys.stdout, "write", fail_write)
+    with pytest.raises(SystemExit):
+        mcp_server._send({"jsonrpc": "2.0", "id": 1, "result": {}})
+    assert fake_os_exit == [0]
+
+
+def test_serve_stdio_exits_cleanly_when_send_hits_broken_pipe(monkeypatch, fake_os_exit):
+    def raise_via_os_exit(obj):
+        mcp_server.os._exit(0)
+
+    monkeypatch.setattr(mcp_server, "_send", raise_via_os_exit)
+    lines = [json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})]
+    with pytest.raises(SystemExit):
+        mcp_server.serve_stdio(in_stream=iter(lines))
+    assert fake_os_exit == [0]
+
+
+def test_serve_stdio_exits_cleanly_on_broken_stdin(fake_os_exit):
+    class BrokenStream:
+        def __iter__(self):
+            raise OSError(22, "Invalid argument")
+
+    # a closed/broken parent pipe on the read side is a normal
+    # end-of-session condition, handled the same way as the write side
+    with pytest.raises(SystemExit):
+        mcp_server.serve_stdio(in_stream=BrokenStream())
+    assert fake_os_exit == [0]

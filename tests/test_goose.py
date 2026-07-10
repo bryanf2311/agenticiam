@@ -254,6 +254,28 @@ def test_run_agent_task_builds_expected_command(monkeypatch):
     assert captured["timeout"] == 30
 
 
+def test_run_agent_task_no_window_suppression_kwarg_on_posix(monkeypatch):
+    """On Windows this should add creationflags=CREATE_NO_WINDOW so
+    dispatch doesn't pop a visible console (a real reported bug — Windows
+    allocates one for a console-subsystem child when the parent, e.g.
+    agenticiam-gui.exe, has none of its own). That branch can't be safely
+    exercised in this Linux sandbox: subprocess.CREATE_NO_WINDOW doesn't
+    exist here, and mutating os.name globally caused a real pytest crash
+    earlier in this project (see test_config_path_windows's history) by
+    interfering with pathlib's platform detection mid-suite. This test
+    instead locks in the current, verifiable platform's behavior: no
+    creationflags kwarg reaches subprocess.run at all."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeCompletedProcess(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    goose.run_agent_task("ollama", "llama3.1:8b", "task", goose_binary="goose")
+    assert captured["kwargs"] == {}
+
+
 def test_run_agent_task_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(
         goose.subprocess, "run",

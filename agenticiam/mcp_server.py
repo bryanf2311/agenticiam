@@ -340,8 +340,25 @@ TOOL_SCHEMAS = [
 
 
 def _send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+    except OSError:
+        # The parent (Goose) closed its end of the stdio pipe — e.g. the
+        # user closed the session/console this was spawned from. Nothing
+        # left to talk to; exit quietly instead of crashing with a
+        # traceback (this surfaced as "OSError: [Errno 22] Invalid
+        # argument" on Windows when writing to a broken pipe).
+        #
+        # os._exit(), not sys.exit(): a plain sys.exit() still lets the
+        # interpreter's normal shutdown sequence try to flush stdout one
+        # more time, which hits the *same* broken pipe again — CPython
+        # then overrides whatever exit code was requested with its own
+        # hardcoded 120 ("failed to flush on exit") and prints an
+        # "Exception ignored" notice to stderr. os._exit() skips shutdown
+        # entirely (no atexit handlers, no stream flushing), guaranteeing
+        # a clean, silent exit(0) instead of that leftover noise.
+        os._exit(0)
 
 
 def _handle_message(directory, principal, message):
@@ -438,14 +455,21 @@ def serve_stdio(db_path=None, in_stream=None):
             lazy["principal"] = info if info.get("active") else None
 
     stream = in_stream or sys.stdin
-    for line in stream:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if message.get("method") == "tools/call":
-            ensure_ready()
-        _handle_message(lazy["directory"], lazy["principal"], message)
+    try:
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("method") == "tools/call":
+                ensure_ready()
+            _handle_message(lazy["directory"], lazy["principal"], message)
+    except OSError:
+        # Reading from a stdin pipe the parent already closed can raise
+        # here too, depending on platform/timing — same story as the write
+        # side in _send: skip normal interpreter shutdown (which would
+        # try, and likely re-fail, one more stdout flush) via os._exit().
+        os._exit(0)

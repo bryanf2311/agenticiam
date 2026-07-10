@@ -312,8 +312,17 @@ def run_agent_task(
     """
     binary = goose_binary or find_goose_binary() or "goose"
     cmd = [binary, "run", "--no-session", "--provider", provider, "--model", model, "-t", task]
+    popen_kwargs = {}
+    if os.name == "nt":
+        # Without this, Windows pops up a new, empty console window for the
+        # child process — the parent (agenticiam-gui.exe, or any MCP stdio
+        # server with no console of its own) has no console to inherit into,
+        # so Windows allocates one, even though stdout/stderr are already
+        # being captured via pipes. Dispatch is meant to run invisibly in
+        # the background; the window was never intentional.
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **popen_kwargs)
     except FileNotFoundError as exc:
         raise DispatchError(f"goose executable not found ({binary})") from exc
     except subprocess.TimeoutExpired as exc:
