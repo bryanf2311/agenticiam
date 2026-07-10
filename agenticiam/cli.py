@@ -4,6 +4,7 @@ network auth required, same trust model as running tools on the DC itself).
 """
 
 import json
+import time
 
 import click
 
@@ -165,7 +166,8 @@ def agent_rotate_secret(name):
 @agent.command("dispatch")
 @click.argument("name")
 @click.argument("task")
-def agent_dispatch(name, task):
+@click.option("--timeout", default=None, type=float, help="Seconds to wait (default 300, matches the extension's own MCP timeout).")
+def agent_dispatch(name, task, timeout):
     """Run a one-shot task through a Goose-linked agent (must be Ollama-backed; see the New Agent wizard docs)."""
     d = _directory()
     try:
@@ -182,10 +184,24 @@ def agent_dispatch(name, task):
         )
     from . import goose as goose_module
 
+    effective_timeout = timeout or goose_module.DEFAULT_DISPATCH_TIMEOUT
+    audit_module.log(
+        d.conn, f"dispatch.{name}", "started", actor_name="cli",
+        detail={"provider": goose_meta["provider"], "model": goose_meta["model"], "timeout_seconds": effective_timeout},
+    )
+    started = time.monotonic()
     try:
-        result = goose_module.run_agent_task(goose_meta["provider"], goose_meta["model"], task)
+        result = goose_module.run_agent_task(goose_meta["provider"], goose_meta["model"], task, timeout=effective_timeout)
     except goose_module.DispatchError as exc:
+        audit_module.log(
+            d.conn, f"dispatch.{name}", "failure", actor_name="cli",
+            detail={"elapsed_seconds": round(time.monotonic() - started, 1), "error": str(exc)},
+        )
         raise click.ClickException(str(exc))
+    audit_module.log(
+        d.conn, f"dispatch.{name}", "success", actor_name="cli",
+        detail={"elapsed_seconds": round(time.monotonic() - started, 1)},
+    )
     click.echo(result)
 
 

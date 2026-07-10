@@ -13,6 +13,7 @@ breaking changes.
 import json
 import os
 import sys
+import time
 import traceback
 
 from . import __version__, audit, db, directory as directory_module, goose, paths, policy, tokens
@@ -138,10 +139,28 @@ def h_dispatch_to_agent(directory, principal, args):
             "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
             "API keys for cloud providers, so there's nothing to dispatch a cloud-backed agent with"
         )
-    response_text = goose.run_agent_task(goose_meta["provider"], goose_meta["model"], args["task"])
+    timeout = args.get("timeout_seconds") or goose.DEFAULT_DISPATCH_TIMEOUT
+    audit.log(
+        directory.conn, f"dispatch.{agent_name}", "started",
+        actor_id=principal.get("sub"), actor_name=principal.get("name"),
+        detail={"provider": goose_meta["provider"], "model": goose_meta["model"], "timeout_seconds": timeout},
+    )
+    started = time.monotonic()
+    try:
+        response_text = goose.run_agent_task(
+            goose_meta["provider"], goose_meta["model"], args["task"], timeout=timeout
+        )
+    except goose.DispatchError as exc:
+        audit.log(
+            directory.conn, f"dispatch.{agent_name}", "failure",
+            actor_id=principal.get("sub"), actor_name=principal.get("name"),
+            detail={"elapsed_seconds": round(time.monotonic() - started, 1), "error": str(exc)},
+        )
+        raise
     audit.log(
         directory.conn, f"dispatch.{agent_name}", "success",
         actor_id=principal.get("sub"), actor_name=principal.get("name"),
+        detail={"elapsed_seconds": round(time.monotonic() - started, 1)},
     )
     return {"agent": agent_name, "response": response_text}
 
@@ -306,7 +325,14 @@ TOOL_SCHEMAS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"agent": {"type": "string"}, "task": {"type": "string"}},
+            "properties": {
+                "agent": {"type": "string"},
+                "task": {"type": "string"},
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "Defaults to 300 (matches the extension's own timeout). Raise it for a known-slow task.",
+                },
+            },
             "required": ["agent", "task"],
         },
     },

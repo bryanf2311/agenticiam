@@ -161,6 +161,66 @@ def test_dispatch_wildcard_permission_works(directory, monkeypatch):
     assert result["response"] == "ok"
 
 
+def test_dispatch_passes_custom_timeout(directory, monkeypatch):
+    captured = {}
+
+    def fake_run(provider, model, task, timeout=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", fake_run)
+    directory.create_identity("agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}})
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:worker1"])
+    mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "hi", "timeout_seconds": 600})
+    assert captured["timeout"] == 600
+
+
+def test_dispatch_defaults_to_300s_timeout(directory, monkeypatch):
+    captured = {}
+
+    def fake_run(provider, model, task, timeout=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", fake_run)
+    directory.create_identity("agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}})
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:worker1"])
+    mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "hi"})
+    assert captured["timeout"] == mcp_server.goose.DEFAULT_DISPATCH_TIMEOUT
+
+
+def test_dispatch_writes_started_and_success_audit_entries(directory, monkeypatch):
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", lambda provider, model, task, **kw: "ok")
+    directory.create_identity("agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}})
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:worker1"])
+    mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "hi"})
+
+    entries = mcp_server.audit.tail(directory.conn, limit=10)
+    actions_and_results = [(e["action"], e["result"]) for e in entries]
+    assert ("dispatch.worker1", "started") in actions_and_results
+    assert ("dispatch.worker1", "success") in actions_and_results
+
+
+def test_dispatch_writes_failure_audit_entry_on_error(directory, monkeypatch):
+    def fail(provider, model, task, **kw):
+        raise mcp_server.goose.DispatchError("boom")
+
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", fail)
+    directory.create_identity("agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}})
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:worker1"])
+    with pytest.raises(mcp_server.goose.DispatchError):
+        mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "hi"})
+
+    entries = mcp_server.audit.tail(directory.conn, limit=10)
+    actions_and_results = [(e["action"], e["result"]) for e in entries]
+    assert ("dispatch.worker1", "started") in actions_and_results
+    assert ("dispatch.worker1", "failure") in actions_and_results
+
+
 def test_serve_stdio_initializes_directory_lazily_on_first_tools_call(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTICIAM_HOME", str(tmp_path))
     sent = []

@@ -267,7 +267,12 @@ def extension_snippet_yaml(
     )
 
 
-def run_agent_task(provider: str, model: str, task: str, timeout: float = 120.0, goose_binary: str = None) -> str:
+DEFAULT_DISPATCH_TIMEOUT = 300.0  # matches the "timeout" field register_extension writes for the extension itself
+
+
+def run_agent_task(
+    provider: str, model: str, task: str, timeout: float = DEFAULT_DISPATCH_TIMEOUT, goose_binary: str = None
+) -> str:
     """Runs a single non-interactive task through Goose as a given
     provider/model and returns its text response — this is the "manager
     dispatches to a worker" mechanism.
@@ -285,6 +290,14 @@ def run_agent_task(provider: str, model: str, task: str, timeout: float = 120.0,
     Callers are expected to enforce that restriction before calling this;
     it isn't re-checked here since this function has no notion of "worker
     identity", just provider/model/task.
+
+    The default timeout matches the extension's own configured MCP
+    timeout (see register_extension) — dispatching used to time out
+    internally at 120s while the extension itself was allowed 300s,
+    meaning our own code was giving up before Goose's own allowance
+    would have. Local-model inference plus whatever extension-loading
+    Goose does on its end can legitimately take a while; callers can pass
+    a longer timeout still for a known-slow task.
     """
     binary = goose_binary or find_goose_binary() or "goose"
     cmd = [binary, "run", "--no-session", "--provider", provider, "--model", model, "-t", task]
@@ -293,7 +306,18 @@ def run_agent_task(provider: str, model: str, task: str, timeout: float = 120.0,
     except FileNotFoundError as exc:
         raise DispatchError(f"goose executable not found ({binary})") from exc
     except subprocess.TimeoutExpired as exc:
-        raise DispatchError(f"dispatched task timed out after {timeout}s") from exc
+        # subprocess.run kills the process and drains whatever output it had
+        # already produced onto the TimeoutExpired exception itself — surface
+        # that instead of a bare "it timed out", since that's the only way to
+        # tell a hung tool call apart from inference that's just plain slow.
+        partial_out = (getattr(exc, "stdout", None) or "").strip()
+        partial_err = (getattr(exc, "stderr", None) or "").strip()
+        detail = ""
+        if partial_err:
+            detail += f"\nstderr so far:\n{partial_err[-2000:]}"
+        if partial_out:
+            detail += f"\nstdout so far:\n{partial_out[-2000:]}"
+        raise DispatchError(f"dispatched task timed out after {timeout}s{detail}") from exc
     if result.returncode != 0:
         raise DispatchError(result.stderr.strip() or f"goose run exited with status {result.returncode}")
     return result.stdout.strip()

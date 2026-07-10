@@ -233,6 +233,42 @@ flags — confirmed against the CLI docs and consistent with everything
 else in this README that touches Goose flags, all of which is verified
 against a real install, not assumed.
 
+### Debugging a dispatch call
+
+Every dispatch — from MCP, REST, or the CLI — now writes a `started`
+audit entry (provider, model, timeout) *before* running anything, then a
+`success` or `failure` entry with elapsed time when it finishes. Tail it
+with `agenticiam audit tail -n 20` while a dispatch is in flight; if you
+only ever see `started` with no matching `success`/`failure`, it's still
+running (or the process was killed some other way) — `agenticiam` itself
+didn't silently swallow it.
+
+The default dispatch timeout is 300 seconds, matching the timeout
+already configured for the extension itself in `config.yaml` (an earlier
+version of this had them mismatched — dispatch would give up internally
+at 120s while the extension was allowed 300s, meaning our own code was
+cutting things off before Goose's own allowance would have). Pass a
+longer one for a known-slow task: `timeout_seconds` in the MCP tool call
+or the REST JSON body, `--timeout` on the CLI. If it still times out, the
+error now includes whatever partial stdout/stderr the `goose run`
+subprocess had already produced — that's usually enough to tell "it's
+genuinely still generating" apart from "it's stuck on something."
+
+One thing worth checking empirically if dispatch is consistently slow:
+every extension marked `enabled: true` in `config.yaml` — which includes
+every agent the wizard has ever created for you — may get loaded by
+Goose for *every* `goose run`/`session` invocation, not just the one
+being dispatched to. If you have several agents registered, a single
+dispatch call could be spinning up several redundant `agenticiam(-gui)`
+child processes in the background before the actual model call even
+starts. Open Task Manager (or `ps` on Linux/macOS) right when you kick
+off a dispatch and watch how many `agenticiam`/`agenticiam-gui`
+processes appear — if it's more than one, that's very likely adding real
+latency on top of local-model inference itself. This isn't something
+AgenticIAM's code controls (it's how Goose loads extensions), so there's
+no code fix for it here yet, but it's worth knowing about if 300s still
+isn't enough on modest hardware with several registered agents.
+
 ## Integrating with Claude Desktop / Claude Code / Claude Cowork (MCP)
 
 Issue a token for whichever identity the session should act as, then point

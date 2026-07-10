@@ -279,3 +279,21 @@ def test_run_agent_task_timeout_raises(monkeypatch):
     monkeypatch.setattr(goose.subprocess, "run", fake_run)
     with pytest.raises(goose.DispatchError, match="timed out"):
         goose.run_agent_task("ollama", "llama3.1:8b", "task", timeout=5)
+
+
+def test_run_agent_task_timeout_surfaces_partial_output(monkeypatch):
+    def fake_run(*a, **k):
+        exc = goose.subprocess.TimeoutExpired(cmd="goose", timeout=5)
+        exc.stdout = "partial response so far..."
+        exc.stderr = "some warning on stderr"
+        raise exc
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    with pytest.raises(goose.DispatchError) as excinfo:
+        goose.run_agent_task("ollama", "llama3.1:8b", "task", timeout=5)
+    assert "partial response so far" in str(excinfo.value)
+    assert "some warning on stderr" in str(excinfo.value)
+
+
+def test_run_agent_task_default_timeout_matches_extension_timeout():
+    assert goose.DEFAULT_DISPATCH_TIMEOUT == 300.0

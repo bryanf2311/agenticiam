@@ -426,6 +426,50 @@ def test_dispatch_success(client, manager_token, ollama_worker, monkeypatch):
     assert body == {"agent": "worker1", "response": "[ollama/llama3.1:8b] summarize the README"}
 
 
+def test_dispatch_writes_started_audit_entry_with_timeout(client, manager_token, ollama_worker, monkeypatch, admin_headers):
+    monkeypatch.setattr(goose, "run_agent_task", lambda provider, model, task, **kw: "ok")
+    client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "hi", "timeout_seconds": 600},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    entries = client.get("/v1/admin/audit?limit=10", headers=admin_headers).get_json()
+    started = next(e for e in entries if e["action"] == "dispatch.worker1" and e["result"] == "started")
+    assert json.loads(started["detail"])["timeout_seconds"] == 600
+
+
+def test_dispatch_passes_custom_timeout_to_run_agent_task(client, manager_token, ollama_worker, monkeypatch):
+    captured = {}
+
+    def fake_run(provider, model, task, timeout=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(goose, "run_agent_task", fake_run)
+    client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "hi", "timeout_seconds": 600},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert captured["timeout"] == 600
+
+
+def test_dispatch_defaults_to_300s(client, manager_token, ollama_worker, monkeypatch):
+    captured = {}
+
+    def fake_run(provider, model, task, timeout=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(goose, "run_agent_task", fake_run)
+    client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "hi"},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert captured["timeout"] == goose.DEFAULT_DISPATCH_TIMEOUT
+
+
 def test_dispatch_failure_returns_502(client, manager_token, ollama_worker, monkeypatch):
     def fail(provider, model, task, **kw):
         raise goose.DispatchError("goose executable not found")

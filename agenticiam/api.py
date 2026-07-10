@@ -10,6 +10,7 @@ scoped to a single self-hosted directory.
 import base64
 import functools
 import sys
+import time
 
 from flask import Flask, Response, g, jsonify, request
 
@@ -293,19 +294,28 @@ def create_app(db_path=None) -> Flask:
         task = (data.get("task") or "").strip()
         if not task:
             return jsonify({"error": "invalid_request", "error_description": "task is required"}), 400
+        timeout = data.get("timeout_seconds") or goose.DEFAULT_DISPATCH_TIMEOUT
 
+        audit.log(
+            directory.conn, f"dispatch.{name}", "started",
+            actor_id=principal.get("sub"), actor_name=principal.get("name"),
+            detail={"provider": goose_meta["provider"], "model": goose_meta["model"], "timeout_seconds": timeout},
+        )
+        started = time.monotonic()
         try:
-            response_text = goose.run_agent_task(goose_meta["provider"], goose_meta["model"], task)
+            response_text = goose.run_agent_task(goose_meta["provider"], goose_meta["model"], task, timeout=timeout)
         except goose.DispatchError as exc:
             audit.log(
                 directory.conn, f"dispatch.{name}", "failure",
-                actor_id=principal.get("sub"), actor_name=principal.get("name"), detail={"error": str(exc)},
+                actor_id=principal.get("sub"), actor_name=principal.get("name"),
+                detail={"elapsed_seconds": round(time.monotonic() - started, 1), "error": str(exc)},
             )
             return jsonify({"error": "dispatch_failed", "error_description": str(exc)}), 502
 
         audit.log(
             directory.conn, f"dispatch.{name}", "success",
             actor_id=principal.get("sub"), actor_name=principal.get("name"),
+            detail={"elapsed_seconds": round(time.monotonic() - started, 1)},
         )
         return jsonify({"agent": name, "response": response_text})
 
