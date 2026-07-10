@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "flask>=3.0,<4.0",
     "click>=8.1,<9.0",
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]

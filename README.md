@@ -132,6 +132,48 @@ It's a thin client over the same `/v1/admin/*` REST API described below —
 anything you can do in the browser you can also script against those
 endpoints directly.
 
+## New Agent wizard (Goose + Ollama)
+
+The **+ New Agent** button in the web console is a 4-step wizard that goes
+from nothing to a running, permissioned local AI agent:
+
+1. **Checks prerequisites** — is [Goose](https://block.github.io/goose/)
+   on `PATH`, is [Ollama](https://ollama.com) reachable at
+   `127.0.0.1:11434`.
+2. **Name & model** — pick a name and an installed Ollama model (fetched
+   live from Ollama's local API).
+3. **Permissions** — check off common scopes (`shell:exec`, `files:read`,
+   `files:write`, `browser:control`, `email:send`) or type custom ones;
+   this becomes a role scoped to just this agent.
+4. **Review & create** — on confirm, it creates the agent identity, role,
+   and permission grants (same directory primitives as everything else in
+   this doc), mints an API key, and registers an `extensions` entry in
+   Goose's `config.yaml` with that key embedded in `envs.AGENTICIAM_TOKEN`
+   — never as a shell string, so it never shows up in a process listing.
+   You get back a ready-to-paste `goose session -n <name> --provider
+   ollama --model <model>` command to start chatting.
+
+Two things worth knowing:
+
+- **Same machine only.** This talks to `goose`'s config file and Ollama's
+  API on whatever machine AgenticIAM's server process is running on. If
+  you're driving the web console from a browser on a *different* machine
+  than the one running `agenticiam serve`/`gui`, the wizard is checking
+  and writing to the server's machine, not yours.
+- **Goose has no per-agent model profile.** `GOOSE_PROVIDER`/`GOOSE_MODEL`
+  are global settings shared by every Goose session; there's no way to
+  give two agents different default models both baked permanently into
+  config.yaml. So by default the wizard leaves your global provider/model
+  alone and just hands you a launch command with `--provider`/`--model`
+  overrides for that one session. Checking "set as Goose's default" in
+  step 4 will change `GOOSE_PROVIDER`/`GOOSE_MODEL` globally — that
+  affects every future `goose session`, not just this agent.
+- If writing `config.yaml` fails (permissions, read-only filesystem, ...)
+  the agent identity/role/key are still created — you just get the raw
+  YAML `extensions` snippet to paste in by hand instead of losing the
+  work. The directory is the source of truth; the config write is
+  best-effort.
+
 ## Integrating with Claude Desktop / Claude Code / Claude Cowork (MCP)
 
 Issue a token for whichever identity the session should act as, then point

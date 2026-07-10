@@ -9,13 +9,35 @@ scoped to a single self-hosted directory.
 
 import base64
 import functools
+import sys
+from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request
 
-from . import audit, db as db_module, directory as directory_module, oauth, paths, policy, tokens
+from . import audit, db as db_module, directory as directory_module, goose, oauth, paths, policy, tokens
 
 ADMIN_PERMISSION = "iam:admin"
 BOOTSTRAP_ROLE = "domain-admin"
+
+
+def _self_command():
+    """Best-guess command+args to relaunch this same binary as an MCP
+    server, for pre-filling the Goose extension wizard.
+
+    When running frozen as the GUI exe, sys.executable points at
+    agenticiam-gui, which ignores argv and always launches the web UI —
+    it has no "mcp" subcommand at all. Point at the sibling CLI binary
+    instead when that's the situation.
+    """
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable)
+        if "-gui" in exe.stem:
+            sibling = exe.with_name(exe.name.replace("-gui", ""))
+            if sibling.exists():
+                return str(sibling), ["mcp"]
+            return "agenticiam", ["mcp"]
+        return sys.executable, ["mcp"]
+    return sys.executable, ["-m", "agenticiam", "mcp"]
 
 
 def create_app(db_path=None) -> Flask:
@@ -424,6 +446,108 @@ def create_app(db_path=None) -> Flask:
     def revoke_api_key(key_id):
         get_directory().revoke_api_key(key_id, actor=_actor())
         return "", 204
+
+    # ------------------------------------------------------------ admin: goose / ollama "new agent" wizard
+    @app.get("/v1/admin/goose/status")
+    @require_permission(ADMIN_PERMISSION)
+    def goose_status():
+        cmd, args = _self_command()
+        try:
+            goose.list_ollama_models()
+            ollama_reachable = True
+        except goose.OllamaUnavailable:
+            ollama_reachable = False
+        return jsonify(
+            {
+                "goose_installed": goose.find_goose_binary() is not None,
+                "goose_path": goose.find_goose_binary(),
+                "ollama_installed": goose.find_ollama_binary() is not None,
+                "ollama_reachable": ollama_reachable,
+                "config_path": str(goose.config_path()),
+                "suggested_cmd": cmd,
+                "suggested_args": args,
+            }
+        )
+
+    @app.get("/v1/admin/goose/models")
+    @require_permission(ADMIN_PERMISSION)
+    def goose_models():
+        try:
+            models = goose.list_ollama_models()
+        except goose.OllamaUnavailable as exc:
+            return jsonify({"available": False, "models": [], "error": str(exc)})
+        return jsonify({"available": True, "models": models})
+
+    @app.post("/v1/admin/goose/agents")
+    @require_permission(ADMIN_PERMISSION)
+    def goose_create_agent():
+        data = request.get_json(force=True)
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "invalid_request", "error_description": "name is required"}), 400
+        permissions = [p.strip() for p in (data.get("permissions") or []) if p and p.strip()]
+        model = (data.get("model") or "").strip() or None
+        provider = (data.get("provider") or "ollama").strip()
+        set_as_default = bool(data.get("set_as_default"))
+        cmd = data.get("cmd")
+        args = data.get("args")
+        if not cmd:
+            cmd, args = _self_command()
+        args = args or ["mcp"]
+
+        directory = get_directory()
+        actor = _actor()
+        role_name = f"{name}-role"
+        try:
+            try:
+                role = directory.create_role(role_name, f"Permissions for Goose agent {name}", actor=actor)
+            except directory_module.ConflictError:
+                role = directory.get_role(role_name)
+            for perm in permissions:
+                directory.grant_permission(role["name"], perm, actor=actor)
+            identity = directory.create_identity("agent", name, display_name=name, actor=actor)
+            directory.assign_role(role["name"], "identity", identity["name"], actor=actor)
+            key = directory.create_api_key(identity["name"], scopes=None, actor=actor)
+        except directory_module.ConflictError as exc:
+            return jsonify({"error": str(exc)}), 409
+        except (directory_module.NotFoundError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        extension_id = goose.slugify(name)
+        launch_command = f"goose session -n {name}"
+        if model:
+            launch_command += f" --provider {provider} --model {model}"
+
+        result = {
+            "identity": identity,
+            "role": role_name,
+            "permissions": permissions,
+            "api_key_id": key["id"],
+            "extension_id": extension_id,
+            "config_path": str(goose.config_path()),
+            "launch_command": launch_command,
+        }
+
+        try:
+            cfg = goose.load_config()
+            cfg = goose.register_extension(cfg, extension_id, name, cmd, args, key["key"])
+            if set_as_default and model:
+                cfg = goose.set_default_provider_model(cfg, provider, model)
+            written_path = goose.save_config(cfg)
+            result["goose_config_written"] = True
+            result["config_path"] = str(written_path)
+        except OSError as exc:
+            result["goose_config_written"] = False
+            result["goose_config_error"] = str(exc)
+            result["manual_extension_snippet"] = goose.extension_snippet_yaml(extension_id, name, cmd, args, key["key"])
+
+        audit.log(
+            directory.conn, "goose.create_agent",
+            "success" if result.get("goose_config_written") else "partial",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            resource=f"identity:{name}", detail={"model": model, "permissions": permissions},
+        )
+        return jsonify(result), 201
 
     # ------------------------------------------------------------ admin: audit
     @app.get("/v1/admin/audit")

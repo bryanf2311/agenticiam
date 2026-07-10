@@ -203,7 +203,10 @@ function showApp() {
     <div class="shell">
       <nav class="sidebar">
         <div class="brand">AgenticIAM</div>
-        ${SECTIONS.map(([id, label]) => `<a data-section="${id}">${esc(label)}</a>`).join('')}
+        <button id="nav-new-agent" style="margin:0 12px 14px;width:calc(100% - 24px)">+ New Agent</button>
+        <div id="section-links">
+          ${SECTIONS.map(([id, label]) => `<a data-section="${id}">${esc(label)}</a>`).join('')}
+        </div>
         <div class="spacer"></div>
         <div class="who">Signed in as <strong>${esc(who.name)}</strong><br>
           ${who.scopes && who.scopes.includes('*') ? 'full admin' : esc((who.scopes || []).join(', ') || 'no permissions')}
@@ -212,19 +215,215 @@ function showApp() {
       </nav>
       <main id="main"></main>
     </div>`;
-  root.querySelectorAll('a[data-section]').forEach(a => a.addEventListener('click', () => selectSection(a.dataset.section)));
+  document.querySelectorAll('#section-links a[data-section]').forEach(a => a.addEventListener('click', () => selectSection(a.dataset.section)));
+  document.getElementById('nav-new-agent').addEventListener('click', () => { resetWizard(); selectSection('newagent'); });
   document.getElementById('logout-link').addEventListener('click', logout);
   selectSection(currentSection);
 }
 
 function selectSection(id) {
   currentSection = id;
-  document.querySelectorAll('a[data-section]').forEach(a => a.classList.toggle('active', a.dataset.section === id));
-  const renderers = { identities: renderIdentities, groups: renderGroups, roles: renderRoles, keys: renderKeys, mcp: renderMcp, audit: renderAudit };
+  document.querySelectorAll('#section-links a[data-section]').forEach(a => a.classList.toggle('active', a.dataset.section === id));
+  const renderers = {
+    identities: renderIdentities, groups: renderGroups, roles: renderRoles, keys: renderKeys,
+    mcp: renderMcp, audit: renderAudit, newagent: renderWizard,
+  };
   renderers[id]();
 }
 
 function errBox(e) { return '<div class="err">' + esc(e.message || String(e)) + '</div>'; }
+
+let wizardStep = 1;
+let wizardState = {};
+
+function resetWizard() {
+  wizardStep = 1;
+  wizardState = {
+    status: null, name: '', model: '', permissions: [], customPermissions: '',
+    setDefault: false, cmd: '', args: '', result: null,
+  };
+}
+
+const WIZARD_COMMON_PERMISSIONS = [
+  ['shell:exec', 'Run shell commands'],
+  ['files:read', 'Read files'],
+  ['files:write', 'Write/modify files'],
+  ['browser:control', 'Control a browser'],
+  ['email:send', 'Send email'],
+];
+
+async function renderWizard() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<h2>New Agent</h2><div id="wizard-body">Loading…</div>';
+  if (wizardStep === 1) return renderWizardStep1();
+  if (wizardStep === 2) return renderWizardStep2();
+  if (wizardStep === 3) return renderWizardStep3();
+  if (wizardStep === 4) return renderWizardStep4();
+  if (wizardStep === 5) return renderWizardStep5();
+}
+
+async function renderWizardStep1() {
+  const body = document.getElementById('wizard-body');
+  try {
+    wizardState.status = await api('/v1/admin/goose/status');
+  } catch (err) { body.innerHTML = errBox(err); return; }
+  const s = wizardState.status;
+  const ready = s.goose_installed && s.ollama_reachable;
+  body.innerHTML = `
+    <div class="panel">
+      <h3>Step 1 of 4 — Check prerequisites</h3>
+      <p class="hint">This configures <strong>Goose</strong> on this machine to use an Ollama model with a new AgenticIAM agent identity wired in as an MCP tool — permissions and all.</p>
+      <table><tbody>
+        <tr><td>Goose CLI</td><td>${s.goose_installed ? '<span class="badge on">found</span> <span class="hint mono">' + esc(s.goose_path) + '</span>' : '<span class="badge off">not found</span>'}</td></tr>
+        <tr><td>Ollama</td><td>${s.ollama_reachable ? '<span class="badge on">running</span>' : (s.ollama_installed ? '<span class="badge off">installed, not running</span>' : '<span class="badge off">not found</span>')}</td></tr>
+      </tbody></table>
+      ${!s.goose_installed ? '<p class="hint">Install Goose: <a href="https://block.github.io/goose/docs/getting-started/installation" target="_blank" rel="noopener">block.github.io/goose</a></p>' : ''}
+      ${!s.ollama_reachable ? '<p class="hint">Install/start Ollama: <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>, then run <span class="mono">ollama serve</span> and pull a model, e.g. <span class="mono">ollama pull llama3.1</span>.</p>' : ''}
+      <p class="hint">Goose config will be written to <span class="mono">${esc(s.config_path)}</span> (a backup of any existing file is kept alongside it).</p>
+      <div class="submit-row row">
+        <button class="secondary" id="wiz-recheck">Re-check</button>
+        <button id="wiz-next" ${ready ? '' : 'disabled'}>Next</button>
+      </div>
+    </div>`;
+  document.getElementById('wiz-recheck').addEventListener('click', renderWizardStep1);
+  document.getElementById('wiz-next').addEventListener('click', () => { wizardStep = 2; renderWizard(); });
+}
+
+async function renderWizardStep2() {
+  const body = document.getElementById('wizard-body');
+  body.innerHTML = 'Loading models…';
+  let models = [];
+  let modelErr = null;
+  try {
+    const res = await api('/v1/admin/goose/models');
+    if (res.available) models = res.models; else modelErr = res.error || 'Ollama unavailable';
+  } catch (err) { modelErr = err.message; }
+  body.innerHTML = `
+    <div class="panel">
+      <h3>Step 2 of 4 — Name & model</h3>
+      <label>Agent name</label>
+      <input id="wiz-name" value="${esc(wizardState.name)}" placeholder="research-bot">
+      <label>Ollama model</label>
+      ${models.length
+        ? `<select id="wiz-model">${models.map(m => `<option value="${esc(m)}" ${m === wizardState.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`
+        : `<div class="err">${esc(modelErr || 'No models found — pull one with `ollama pull llama3.1`.')}</div>`}
+      <div class="submit-row row">
+        <button class="secondary" id="wiz-back">Back</button>
+        <button id="wiz-next" ${models.length ? '' : 'disabled'}>Next</button>
+      </div>
+    </div>`;
+  document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 1; renderWizard(); });
+  document.getElementById('wiz-next').addEventListener('click', () => {
+    const nameInput = document.getElementById('wiz-name').value.trim();
+    if (!nameInput) { alert('Please enter a name.'); return; }
+    wizardState.name = nameInput;
+    const modelSel = document.getElementById('wiz-model');
+    wizardState.model = modelSel ? modelSel.value : '';
+    wizardStep = 3; renderWizard();
+  });
+}
+
+function renderWizardStep3() {
+  const body = document.getElementById('wizard-body');
+  body.innerHTML = `
+    <div class="panel">
+      <h3>Step 3 of 4 — Permissions</h3>
+      <p class="hint">What should "${esc(wizardState.name)}" be allowed to do? This becomes a role scoped just to this agent.</p>
+      ${WIZARD_COMMON_PERMISSIONS.map(([perm, label]) => `
+        <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+          <input type="checkbox" value="${perm}" ${wizardState.permissions.includes(perm) ? 'checked' : ''} style="width:auto">
+          <span>${esc(label)} <span class="mono hint">(${perm})</span></span>
+        </label>`).join('')}
+      <label>Additional permissions (space-separated, e.g. files:* custom:scope)</label>
+      <input id="wiz-custom-perms" value="${esc(wizardState.customPermissions)}">
+      <div class="submit-row row">
+        <button class="secondary" id="wiz-back">Back</button>
+        <button id="wiz-next">Next</button>
+      </div>
+    </div>`;
+  document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 2; renderWizard(); });
+  document.getElementById('wiz-next').addEventListener('click', () => {
+    wizardState.permissions = Array.from(body.querySelectorAll('input[type=checkbox]:checked')).map(i => i.value);
+    wizardState.customPermissions = document.getElementById('wiz-custom-perms').value;
+    wizardStep = 4; renderWizard();
+  });
+}
+
+function renderWizardStep4() {
+  const body = document.getElementById('wizard-body');
+  const s = wizardState.status || {};
+  if (!wizardState.cmd) wizardState.cmd = s.suggested_cmd || 'agenticiam';
+  if (!wizardState.args) wizardState.args = (s.suggested_args || ['mcp']).join(' ');
+  const allPerms = wizardState.permissions.concat((wizardState.customPermissions || '').split(/\s+/).filter(Boolean));
+  body.innerHTML = `
+    <div class="panel">
+      <h3>Step 4 of 4 — Review & create</h3>
+      <table><tbody>
+        <tr><td>Name</td><td>${esc(wizardState.name)}</td></tr>
+        <tr><td>Model</td><td>${esc(wizardState.model)} <span class="hint">(ollama)</span></td></tr>
+        <tr><td>Permissions</td><td class="mono">${esc(allPerms.join(', ') || '(none)')}</td></tr>
+        <tr><td>Goose config</td><td class="mono">${esc(s.config_path || '')}</td></tr>
+      </tbody></table>
+      <label>Command Goose should run for this agent's MCP tools</label>
+      <input id="wiz-cmd" value="${esc(wizardState.cmd)}">
+      <label>Arguments (space-separated)</label>
+      <input id="wiz-args" value="${esc(wizardState.args)}">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+        <input type="checkbox" id="wiz-default" ${wizardState.setDefault ? 'checked' : ''} style="width:auto">
+        <span>Also set this as Goose's default provider/model (affects <em>all</em> Goose sessions, not just this agent)</span>
+      </label>
+      <div class="submit-row row">
+        <button class="secondary" id="wiz-back">Back</button>
+        <button id="wiz-create">Create agent</button>
+      </div>
+      <div id="wiz-create-msg"></div>
+    </div>`;
+  document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 3; renderWizard(); });
+  document.getElementById('wiz-create').addEventListener('click', async () => {
+    wizardState.cmd = document.getElementById('wiz-cmd').value.trim();
+    wizardState.args = document.getElementById('wiz-args').value.trim();
+    wizardState.setDefault = document.getElementById('wiz-default').checked;
+    const msg = document.getElementById('wiz-create-msg');
+    msg.innerHTML = 'Creating…';
+    try {
+      const res = await api('/v1/admin/goose/agents', { method: 'POST', json: {
+        name: wizardState.name,
+        model: wizardState.model,
+        provider: 'ollama',
+        permissions: allPerms,
+        set_as_default: wizardState.setDefault,
+        cmd: wizardState.cmd,
+        args: wizardState.args.split(/\s+/).filter(Boolean),
+      } });
+      wizardState.result = res;
+      wizardStep = 5;
+      renderWizard();
+    } catch (err) { msg.innerHTML = errBox(err); }
+  });
+}
+
+function renderWizardStep5() {
+  const body = document.getElementById('wizard-body');
+  const r = wizardState.result;
+  body.innerHTML = `
+    <div class="panel">
+      <h3>Agent created</h3>
+      <p class="ok">"${esc(r.identity.name)}" is ready.</p>
+      ${r.goose_config_written
+        ? `<p>Goose extension registered at <span class="mono">${esc(r.config_path)}</span>.</p>`
+        : `<div class="err">Couldn't write Goose config automatically: ${esc(r.goose_config_error)}</div>
+           <p>Add this to <span class="mono">${esc(r.config_path)}</span> by hand:</p>
+           <textarea rows="9" readonly>${esc(r.manual_extension_snippet)}</textarea>`}
+      <label>Run this to start chatting with your agent:</label>
+      <div class="secret-box">${esc(r.launch_command)}</div>
+      <div class="submit-row row">
+        <button class="secondary" id="wiz-copy">Copy command</button>
+        <button id="wiz-another">Create another agent</button>
+      </div>
+    </div>`;
+  document.getElementById('wiz-copy').addEventListener('click', () => navigator.clipboard.writeText(r.launch_command));
+  document.getElementById('wiz-another').addEventListener('click', () => { resetWizard(); renderWizard(); });
+}
 
 async function renderIdentities() {
   const main = document.getElementById('main');
