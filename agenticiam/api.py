@@ -351,11 +351,49 @@ def create_app(db_path=None) -> Flask:
     @app.delete("/v1/admin/identities/<name>")
     @require_permission(ADMIN_PERMISSION)
     def delete_identity(name):
+        directory = get_directory()
+        actor = _actor()
         try:
-            get_directory().delete_identity(name, actor=_actor())
+            identity = directory.get_identity(name)
         except directory_module.NotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
-        return "", 204
+        goose_meta = (identity.get("metadata") or {}).get("goose")
+
+        directory.delete_identity(name, actor=actor)
+
+        if not goose_meta:
+            return "", 204
+
+        # The identity is gone from the directory, but it may still be
+        # registered as a Goose MCP extension in config.yaml, pointing at an
+        # AGENTICIAM_TOKEN that no longer authenticates — clean that up too
+        # rather than leaving a dead entry behind.
+        extension_id = goose.slugify(name)
+        result = {"identity": name, "extension_id": extension_id, "config_path": str(goose.config_path())}
+        try:
+            cfg = goose.load_config()
+            if extension_id in (cfg.get("extensions") or {}):
+                cfg = goose.remove_extension(cfg, extension_id)
+                written_path = goose.save_config(cfg)
+                result["goose_config_updated"] = True
+                result["config_path"] = str(written_path)
+            else:
+                result["goose_config_updated"] = False
+                result["goose_config_note"] = "no matching extension entry was found in config.yaml"
+        except OSError as exc:
+            result["goose_config_updated"] = False
+            result["goose_config_error"] = str(exc)
+            result["manual_removal_instructions"] = (
+                f"Open {result['config_path']} and delete the '{extension_id}:' block under 'extensions:'."
+            )
+
+        audit.log(
+            directory.conn, "goose.cleanup_extension",
+            "success" if result.get("goose_config_updated") else "partial",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            resource=f"identity:{name}",
+        )
+        return jsonify(result), 200
 
     @app.post("/v1/admin/identities/<name>/enabled")
     @require_permission(ADMIN_PERMISSION)
@@ -426,6 +464,27 @@ def create_app(db_path=None) -> Flask:
         except directory_module.NotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
         return "", 204
+
+    @app.get("/v1/admin/groups/<name>/launch-commands")
+    @require_permission(ADMIN_PERMISSION)
+    def group_launch_commands(name):
+        try:
+            members = get_directory().list_members(name)
+        except directory_module.NotFoundError as exc:
+            return jsonify({"error": str(exc)}), 404
+        agents = []
+        for member in members:
+            goose_meta = (member.get("metadata") or {}).get("goose")
+            commands = None
+            if goose_meta and goose_meta.get("provider") and goose_meta.get("model"):
+                commands = goose.launch_commands(
+                    member["name"], goose_meta["provider"], goose_meta["model"],
+                    context_limit=goose_meta.get("context_limit"),
+                )
+            agents.append(
+                {"name": member["name"], "kind": member["kind"], "goose": goose_meta, "launch_commands": commands}
+            )
+        return jsonify({"group": name, "agents": agents})
 
     # ------------------------------------------------------------ admin: roles
     @app.get("/v1/admin/roles")
@@ -572,6 +631,7 @@ def create_app(db_path=None) -> Flask:
         except (TypeError, ValueError):
             return jsonify({"error": "invalid_request", "error_description": "context_limit must be an integer"}), 400
         set_as_default = bool(data.get("set_as_default"))
+        group_name = (data.get("group") or "").strip() or None
         cmd = data.get("cmd")
         args = data.get("args")
         if not cmd:
@@ -595,6 +655,12 @@ def create_app(db_path=None) -> Flask:
             )
             directory.assign_role(role["name"], "identity", identity["name"], actor=actor)
             key = directory.create_api_key(identity["name"], scopes=None, actor=actor)
+            if group_name:
+                try:
+                    group = directory.create_group(group_name, actor=actor)
+                except directory_module.ConflictError:
+                    group = directory.get_group(group_name)
+                directory.add_member(group["name"], identity["name"], actor=actor)
         except directory_module.ConflictError as exc:
             return jsonify({"error": str(exc)}), 409
         except (directory_module.NotFoundError, ValueError) as exc:
@@ -619,6 +685,7 @@ def create_app(db_path=None) -> Flask:
             "extension_id": extension_id,
             "config_path": str(goose.config_path()),
             "launch_commands": launch_commands,
+            "group": group_name,
         }
 
         try:

@@ -152,7 +152,9 @@ from nothing to a running, permissioned AI agent:
      expects them via env var or its OS-keyring-backed secret store).
 3. **Permissions** — check off common scopes (`shell:exec`, `files:read`,
    `files:write`, `browser:control`, `email:send`) or type custom ones;
-   this becomes a role scoped to just this agent.
+   this becomes a role scoped to just this agent. There's also an
+   optional **Group** field here — put the agent in a team (e.g.
+   "marketing") alongside its teammates; see "Teams" below.
 4. **Review & create** — set an optional context window (tokens), then on
    confirm it creates the agent identity, role, and permission grants
    (same directory primitives as everything else in this doc), mints an
@@ -196,6 +198,34 @@ Two things worth knowing:
   with none, it opens the browser. So the wizard always points the
   extension at whichever binary is actually running the server, and it
   works whether you have one executable on disk or both.
+- **Deleting an agent cleans up after itself.** If the identity was
+  registered as a Goose extension, deleting it also removes that
+  `extensions` entry from `config.yaml` (with the usual backup-first
+  write) so you don't accumulate dead entries pointing at a token that no
+  longer authenticates. You get a confirmation screen either way — what
+  was removed and from where, or, if the automatic cleanup fails
+  (permissions, read-only FS), the exact block to delete by hand instead.
+  The identity itself is always gone from the directory regardless of
+  whether the config.yaml cleanup succeeds.
+
+## Teams (groups)
+
+Groups are AgenticIAM's existing security-group primitive (see the web
+console's Groups tab) — the wizard's basic team workflow is: create
+"marketing-boss", "marketing-manager", and "marketing-intern" through the
+wizard, typing the same group name ("marketing") into each one's optional
+Group field in step 3 (or add them to an existing group afterward from
+the Groups tab).
+
+Once they're grouped, open that group in the Groups tab and click **Show
+start commands for this team** — it lists every Goose-linked member's
+launch command (bash/PowerShell/cmd, same as the wizard's final screen)
+in one place, so you can open a terminal tab per teammate and get the
+whole team running. This is deliberately just a list of commands to
+copy, not an automatic multi-window launcher — actually spawning several
+interactive terminal sessions reliably from a background web server
+process is OS-specific and not something to fake without being able to
+verify it actually works; the commands are the reliable part.
 
 ## Multi-agent: managers dispatching to workers
 

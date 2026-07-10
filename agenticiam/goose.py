@@ -174,6 +174,17 @@ def register_extension(
     return config
 
 
+def remove_extension(config: dict, extension_id: str) -> dict:
+    """Inverse of register_extension — used when deleting an identity that
+    was registered as a Goose extension, so config.yaml doesn't accumulate
+    dead entries pointing at a token that no longer authenticates."""
+    config = dict(config)
+    extensions = dict(config.get("extensions") or {})
+    extensions.pop(extension_id, None)
+    config["extensions"] = extensions
+    return config
+
+
 def set_default_provider_model(config: dict, provider: str, model: str, context_limit: int = None) -> dict:
     config = dict(config)
     config["GOOSE_PROVIDER"] = provider

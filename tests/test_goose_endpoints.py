@@ -498,3 +498,150 @@ def test_dispatch_wildcard_permission(client, directory, ollama_worker, monkeypa
     )
     assert resp.status_code == 200
     assert resp.get_json()["response"] == "ok"
+
+
+# ---------------------------------------------------------------- groups (team workflow)
+
+def test_create_goose_agent_with_new_group(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "marketing-boss", "permissions": [], "group": "marketing"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    assert resp.get_json()["group"] == "marketing"
+
+    members = client.get("/v1/admin/groups/marketing/members", headers=admin_headers).get_json()
+    assert [m["name"] for m in members] == ["marketing-boss"]
+
+
+def test_create_goose_agent_with_existing_group(client, admin_headers, directory, goose_config_path):
+    directory.create_group("marketing", "The marketing team")
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "marketing-intern", "permissions": [], "group": "marketing"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    members = client.get("/v1/admin/groups/marketing/members", headers=admin_headers).get_json()
+    assert [m["name"] for m in members] == ["marketing-intern"]
+
+
+def test_create_goose_agent_without_group_field_unaffected(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents", json={"name": "lone-agent", "permissions": []}, headers=admin_headers
+    )
+    assert resp.status_code == 201
+    assert resp.get_json()["group"] is None
+
+
+def test_group_launch_commands(client, admin_headers, goose_config_path):
+    client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "marketing-boss", "permissions": [], "provider": "ollama", "model": "llama3.1:8b", "group": "marketing"},
+        headers=admin_headers,
+    )
+    client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "marketing-intern", "permissions": [], "provider": "ollama", "model": "phi4", "group": "marketing"},
+        headers=admin_headers,
+    )
+    resp = client.get("/v1/admin/groups/marketing/launch-commands", headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["group"] == "marketing"
+    names = {a["name"] for a in body["agents"]}
+    assert names == {"marketing-boss", "marketing-intern"}
+    boss = next(a for a in body["agents"] if a["name"] == "marketing-boss")
+    assert "goose session -n marketing-boss" in boss["launch_commands"]["bash"]
+    assert "GOOSE_MODEL=llama3.1:8b" in boss["launch_commands"]["bash"]
+
+
+def test_group_launch_commands_skips_non_goose_members(client, admin_headers, directory, goose_config_path):
+    directory.create_group("marketing")
+    directory.create_identity("agent", "plain-member")
+    directory.add_member("marketing", "plain-member")
+    resp = client.get("/v1/admin/groups/marketing/launch-commands", headers=admin_headers)
+    assert resp.status_code == 200
+    agent = resp.get_json()["agents"][0]
+    assert agent["name"] == "plain-member"
+    assert agent["launch_commands"] is None
+
+
+def test_group_launch_commands_unknown_group(client, admin_headers):
+    resp = client.get("/v1/admin/groups/does-not-exist/launch-commands", headers=admin_headers)
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------- delete cleans up config.yaml
+
+def test_delete_non_goose_identity_returns_204(client, admin_headers, directory):
+    directory.create_identity("agent", "plain-agent")
+    resp = client.delete("/v1/admin/identities/plain-agent", headers=admin_headers)
+    assert resp.status_code == 204
+    assert resp.data == b""
+
+
+def test_delete_goose_identity_removes_extension_from_config(client, admin_headers, goose_config_path):
+    client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "marketing-boss", "permissions": [], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    assert "marketing-boss" in goose.load_config()["extensions"]
+
+    resp = client.delete("/v1/admin/identities/marketing-boss", headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["goose_config_updated"] is True
+    assert "marketing-boss" not in goose.load_config().get("extensions", {})
+
+    # identity is really gone
+    listing = client.get("/v1/admin/identities", headers=admin_headers).get_json()
+    assert "marketing-boss" not in [i["name"] for i in listing]
+
+
+def test_delete_goose_identity_preserves_other_extensions(client, admin_headers, goose_config_path):
+    client.post(
+        "/v1/admin/goose/agents", json={"name": "keep-me", "permissions": [], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    client.post(
+        "/v1/admin/goose/agents", json={"name": "delete-me", "permissions": [], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    client.delete("/v1/admin/identities/delete-me", headers=admin_headers)
+    remaining = goose.load_config()["extensions"]
+    assert "keep-me" in remaining
+    assert "delete-me" not in remaining
+
+
+def test_delete_goose_identity_config_write_failure_gives_manual_instructions(
+    client, admin_headers, goose_config_path, monkeypatch
+):
+    client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "marketing-boss", "permissions": [], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    monkeypatch.setattr(goose, "save_config", lambda cfg: (_ for _ in ()).throw(OSError("permission denied")))
+    resp = client.delete("/v1/admin/identities/marketing-boss", headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["goose_config_updated"] is False
+    assert "permission denied" in body["goose_config_error"]
+    assert "marketing-boss" in body["manual_removal_instructions"]
+    # the identity itself is still gone even though the config write failed
+    listing = client.get("/v1/admin/identities", headers=admin_headers).get_json()
+    assert "marketing-boss" not in [i["name"] for i in listing]
+
+
+def test_delete_goose_identity_missing_from_config_noted_not_errored(client, admin_headers, directory, goose_config_path):
+    directory.create_identity(
+        "agent", "orphan-meta", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}}
+    )
+    resp = client.delete("/v1/admin/identities/orphan-meta", headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["goose_config_updated"] is False
+    assert "goose_config_note" in body

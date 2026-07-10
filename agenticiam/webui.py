@@ -241,7 +241,7 @@ function resetWizard() {
   wizardState = {
     status: null, name: '', provider: 'ollama', model: '', apiKey: '',
     contextLimit: '', permissions: [], customPermissions: '',
-    dispatchWildcard: false, dispatchTargets: [],
+    dispatchWildcard: false, dispatchTargets: [], group: '',
     setDefault: false, cmd: '', args: '', result: null,
   };
 }
@@ -378,7 +378,17 @@ async function renderWizardStep3() {
   const body = document.getElementById('wizard-body');
   body.innerHTML = 'Loading…';
   let existingAgents = [];
+  let existingGroups = [];
   try { existingAgents = await api('/v1/admin/identities?kind=agent'); } catch (err) { /* manager section just won't show */ }
+  try { existingGroups = await api('/v1/admin/groups'); } catch (err) { /* group field still works, just no autocomplete */ }
+
+  const groupSection = `
+    <h3 style="margin-top:26px">Group (optional)</h3>
+    <p class="hint">Put "${esc(wizardState.name)}" in a group with its teammates — e.g. create/reuse "marketing" for a marketing-boss + marketing-manager + marketing-intern team. Pick an existing one or type a new name.</p>
+    <input id="wiz-group" list="wiz-group-options" value="${esc(wizardState.group)}" placeholder="e.g. marketing">
+    <datalist id="wiz-group-options">
+      ${existingGroups.map(g => `<option value="${esc(g.name)}">`).join('')}
+    </datalist>`;
 
   const managerSection = existingAgents.length ? `
     <h3 style="margin-top:26px">Manager permissions (optional)</h3>
@@ -406,13 +416,17 @@ async function renderWizardStep3() {
         </label>`).join('')}
       <label>Additional permissions (space-separated, e.g. files:* custom:scope)</label>
       <input id="wiz-custom-perms" value="${esc(wizardState.customPermissions)}">
+      ${groupSection}
       ${managerSection}
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
         <button id="wiz-next">Next</button>
       </div>
     </div>`;
-  document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 2; renderWizard(); });
+  document.getElementById('wiz-back').addEventListener('click', () => {
+    wizardState.group = document.getElementById('wiz-group').value.trim();
+    wizardStep = 2; renderWizard();
+  });
   const wildcardCb = document.getElementById('wiz-dispatch-wildcard');
   if (wildcardCb) {
     wildcardCb.addEventListener('change', (e) => {
@@ -424,6 +438,7 @@ async function renderWizardStep3() {
   document.getElementById('wiz-next').addEventListener('click', () => {
     wizardState.permissions = Array.from(body.querySelectorAll('.wiz-perm-checkbox:checked')).map(i => i.value);
     wizardState.customPermissions = document.getElementById('wiz-custom-perms').value;
+    wizardState.group = document.getElementById('wiz-group').value.trim();
     wizardState.dispatchWildcard = wildcardCb ? wildcardCb.checked : false;
     wizardState.dispatchTargets = Array.from(body.querySelectorAll('.wiz-dispatch-target:checked')).map(i => i.value);
     wizardStep = 4; renderWizard();
@@ -445,6 +460,7 @@ function renderWizardStep4() {
         <tr><td>Name</td><td>${esc(wizardState.name)}</td></tr>
         <tr><td>Provider</td><td>${esc(providerLabel)}</td></tr>
         <tr><td>Model</td><td>${esc(wizardState.model)}</td></tr>
+        <tr><td>Group</td><td>${esc(wizardState.group || '(none)')}</td></tr>
         <tr><td>Permissions</td><td class="mono">${esc(allPerms.join(', ') || '(none)')}</td></tr>
         <tr><td>Goose config</td><td class="mono">${esc(s.config_path || '')}</td></tr>
       </tbody></table>
@@ -483,6 +499,7 @@ function renderWizardStep4() {
         api_key: wizardState.apiKey || undefined,
         context_limit: wizardState.contextLimit ? parseInt(wizardState.contextLimit, 10) : undefined,
         permissions: allPerms,
+        group: wizardState.group || undefined,
         set_as_default: wizardState.setDefault,
         cmd: wizardState.cmd,
         args: wizardState.args.split(/\\s+/).filter(Boolean),
@@ -501,7 +518,7 @@ function renderWizardStep5() {
   body.innerHTML = `
     <div class="panel">
       <h3>Agent created</h3>
-      <p class="ok">"${esc(r.identity.name)}" is ready.</p>
+      <p class="ok">"${esc(r.identity.name)}" is ready.${r.group ? ` Added to group "${esc(r.group)}".` : ''}</p>
       ${r.goose_config_written
         ? `<p>Goose extension registered at <span class="mono">${esc(r.config_path)}</span>.</p>`
         : `<div class="err">Couldn't write Goose config automatically: ${esc(r.goose_config_error)}</div>
@@ -589,8 +606,12 @@ async function handleIdentityAction(btn) {
       renderIdentities();
     } else if (act === 'delete') {
       if (!confirm('Delete identity "' + name + '"? This cannot be undone.')) return;
-      await api('/v1/admin/identities/' + encodeURIComponent(name), { method: 'DELETE' });
-      renderIdentities();
+      const res = await api('/v1/admin/identities/' + encodeURIComponent(name), { method: 'DELETE' });
+      if (res && Object.prototype.hasOwnProperty.call(res, 'goose_config_updated')) {
+        renderIdentityDeleteResult(res);
+      } else {
+        renderIdentities();
+      }
     } else if (act === 'rotate') {
       const res = await api('/v1/admin/identities/' + encodeURIComponent(name) + '/rotate-secret', { method: 'POST', json: {} });
       alert('New secret for ' + name + ' (shown once):\\n\\n' + res.secret);
@@ -599,6 +620,28 @@ async function handleIdentityAction(btn) {
       alert('Effective permissions for ' + name + ':\\n\\n' + (res.length ? res.join('\\n') : '(none)'));
     }
   } catch (err) { alert(err.message); }
+}
+
+function renderIdentityDeleteResult(res) {
+  const main = document.getElementById('main');
+  let body;
+  if (res.goose_config_updated) {
+    body = `<p class="ok">Removed the "${esc(res.identity)}" extension entry from <span class="mono">${esc(res.config_path)}</span>.</p>`;
+  } else if (res.goose_config_error) {
+    body = `
+      <div class="err">Deleted "${esc(res.identity)}" from AgenticIAM, but couldn't automatically update Goose's config: ${esc(res.goose_config_error)}</div>
+      <p>Remove it from <span class="mono">${esc(res.config_path)}</span> by hand — run this, or open the file and delete the block yourself:</p>
+      <textarea rows="3" readonly>${esc(res.manual_removal_instructions || '')}</textarea>`;
+  } else {
+    body = `<p class="hint">"${esc(res.identity)}" was deleted. ${esc(res.goose_config_note || 'No matching entry was found in Goose\\'s config.yaml — nothing to clean up there.')}</p>`;
+  }
+  main.innerHTML = `
+    <h2>Identity deleted</h2>
+    <div class="panel">
+      ${body}
+      <div class="submit-row"><button id="back-to-identities">Back to Identities</button></div>
+    </div>`;
+  document.getElementById('back-to-identities').addEventListener('click', renderIdentities);
 }
 
 async function renderGroups() {
@@ -646,7 +689,9 @@ async function renderGroupDetail(name) {
         <td><button class="danger" data-rm="${esc(m.name)}">Remove</button></td></tr>`).join('') || '<tr><td class="hint">No members yet</td></tr>'}</tbody></table>
       <form id="f-member"><label>Add identity by name</label><input name="identity" required>
       <div class="submit-row"><button type="submit">Add to group</button></div></form>
-      <div id="member-msg"></div>`;
+      <div id="member-msg"></div>
+      <div class="submit-row"><button class="secondary" id="btn-start-group">Show start commands for this team</button></div>
+      <div id="group-start-commands"></div>`;
     detail.querySelectorAll('button[data-rm]').forEach(b => b.addEventListener('click', async () => {
       try { await api('/v1/admin/groups/' + encodeURIComponent(name) + '/members/' + encodeURIComponent(b.dataset.rm), { method: 'DELETE' }); renderGroupDetail(name); }
       catch (err) { alert(err.message); }
@@ -660,7 +705,38 @@ async function renderGroupDetail(name) {
         renderGroupDetail(name);
       } catch (err) { msg.innerHTML = errBox(err); }
     });
+    document.getElementById('btn-start-group').addEventListener('click', () => renderGroupStartCommands(name));
   } catch (err) { detail.innerHTML = errBox(err); }
+}
+
+async function renderGroupStartCommands(name) {
+  const wrap = document.getElementById('group-start-commands');
+  wrap.innerHTML = 'Loading…';
+  const shells = [['bash', 'macOS / Linux (bash, zsh)'], ['powershell', 'Windows PowerShell'], ['cmd', 'Windows cmd.exe']];
+  try {
+    const res = await api('/v1/admin/groups/' + encodeURIComponent(name) + '/launch-commands');
+    wrap.innerHTML = `
+      <h3 style="margin-top:22px">Start "${esc(name)}"</h3>
+      <p class="hint">One set of commands per teammate — open a terminal tab per agent and paste the line for your shell. Agents not created through the Goose wizard have no start command and are skipped.</p>
+      ${res.agents.map(a => a.launch_commands ? `
+        <div class="panel">
+          <strong>${esc(a.name)}</strong>
+          ${shells.map(([key, label]) => `
+            <div style="margin:8px 0">
+              <div class="hint">${esc(label)}</div>
+              <div class="row" style="align-items:stretch">
+                <div class="secret-box" style="flex:1;margin:4px 0">${esc(a.launch_commands[key])}</div>
+                <button class="secondary" data-copy-cmd="${esc(a.name)}::${key}">Copy</button>
+              </div>
+            </div>`).join('')}
+        </div>` : `<div class="panel hint">${esc(a.name)}: not a Goose agent, no start command.</div>`
+      ).join('') || '<p class="hint">No members yet.</p>'}`;
+    wrap.querySelectorAll('button[data-copy-cmd]').forEach(btn => btn.addEventListener('click', () => {
+      const [agentName, shellKey] = btn.dataset.copyCmd.split('::');
+      const agent = res.agents.find(a => a.name === agentName);
+      navigator.clipboard.writeText(agent.launch_commands[shellKey]);
+    }));
+  } catch (err) { wrap.innerHTML = errBox(err); }
 }
 
 async function renderRoles() {
