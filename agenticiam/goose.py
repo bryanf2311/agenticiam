@@ -41,6 +41,34 @@ PROVIDER_API_KEY_ENV = {
 }
 
 
+def ollama_install_commands() -> dict:
+    """Confirmed against ollama.com's own documented one-liner (macOS/Linux)
+    and the winget package id `Ollama.Ollama` (Windows) — not guessed."""
+    return {
+        "bash": "curl -fsSL https://ollama.com/install.sh | sh && ollama --version",
+        "powershell": "winget install -e --id Ollama.Ollama; ollama --version",
+        "cmd": "winget install -e --id Ollama.Ollama && ollama --version",
+    }
+
+
+def goose_install_commands() -> dict:
+    """Confirmed against block/goose's own installation docs — the CLI
+    download script (not the Desktop app installer), with CONFIGURE=false
+    so the script doesn't stop to interactively prompt for a provider."""
+    return {
+        "bash": "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
+        "powershell": (
+            'Invoke-WebRequest -Uri "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1" '
+            '-OutFile "download_cli.ps1"; .\\download_cli.ps1'
+        ),
+        "cmd": (
+            "REM Goose's Windows installer is a PowerShell script; run this from PowerShell, not cmd.exe:\n"
+            'REM Invoke-WebRequest -Uri "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1" '
+            '-OutFile "download_cli.ps1"; .\\download_cli.ps1'
+        ),
+    }
+
+
 class ProviderUnavailable(Exception):
     pass
 

@@ -193,7 +193,7 @@ function showLogin() {
 }
 
 const SECTIONS = [
-  ['identities', 'Identities'], ['groups', 'Groups'], ['roles', 'Roles'],
+  ['setup', 'Setup'], ['identities', 'Identities'], ['groups', 'Groups'], ['roles', 'Roles'],
   ['keys', 'Tokens & Keys'], ['mcp', 'MCP / Agent Setup'], ['audit', 'Audit Log'],
 ];
 let currentSection = 'identities';
@@ -225,7 +225,7 @@ function selectSection(id) {
   currentSection = id;
   document.querySelectorAll('#section-links a[data-section]').forEach(a => a.classList.toggle('active', a.dataset.section === id));
   const renderers = {
-    identities: renderIdentities, groups: renderGroups, roles: renderRoles, keys: renderKeys,
+    setup: renderSetup, identities: renderIdentities, groups: renderGroups, roles: renderRoles, keys: renderKeys,
     mcp: renderMcp, audit: renderAudit, newagent: renderWizard,
   };
   renderers[id]();
@@ -239,7 +239,7 @@ let wizardState = {};
 function resetWizard() {
   wizardStep = 1;
   wizardState = {
-    status: null, name: '', provider: 'ollama', model: '', apiKey: '',
+    status: null, target: 'goose', name: '', provider: 'ollama', model: '', apiKey: '',
     contextLimit: '', permissions: [], customPermissions: '',
     dispatchWildcard: false, dispatchTargets: [], group: '',
     setDefault: false, cmd: '', args: '', result: null,
@@ -276,18 +276,32 @@ async function renderWizardStep1() {
     wizardState.status = await api('/v1/admin/goose/status');
   } catch (err) { body.innerHTML = errBox(err); return; }
   const s = wizardState.status;
-  const ready = s.goose_installed;
+  const target = wizardState.target;
+  const ready = target === 'goose' ? s.goose_installed : s.openclaw_installed;
+  const targetRow = target === 'goose'
+    ? `<tr><td>Goose CLI</td><td>${s.goose_installed ? '<span class="badge on">found</span> <span class="hint mono">' + esc(s.goose_path) + '</span>' : '<span class="badge off">not found</span>'}</td></tr>`
+    : `<tr><td>OpenClaw</td><td>${s.openclaw_installed ? '<span class="badge on">found</span> <span class="hint mono">' + esc(s.openclaw_path) + '</span>' : '<span class="badge off">not found</span>'}</td></tr>`;
   body.innerHTML = `
     <div class="panel">
-      <h3>Step 1 of 4 — Check prerequisites</h3>
-      <p class="hint">This configures <strong>Goose</strong> on this machine with a new AgenticIAM agent identity wired in as an MCP tool — permissions and all. You'll pick a model provider next.</p>
+      <h3>Step 1 of 4 — Target & prerequisites</h3>
+      <p class="hint">This wires a new AgenticIAM agent identity into a runtime on this machine as an MCP tool — permissions and all. First, where should it run?</p>
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+        <input type="radio" name="wiz-target" id="wiz-target-goose" value="goose" ${target === 'goose' ? 'checked' : ''} style="width:auto">
+        <span><strong>Goose</strong> <span class="hint">— a single interactive local session per agent (goose session / goose run)</span></span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0 16px">
+        <input type="radio" name="wiz-target" id="wiz-target-openclaw" value="openclaw" ${target === 'openclaw' ? 'checked' : ''} style="width:auto">
+        <span><strong>OpenClaw</strong> <span class="hint">— a persistent gateway persona reachable from chat apps (Discord, Telegram, WhatsApp, ...)</span></span>
+      </label>
       <table><tbody>
-        <tr><td>Goose CLI</td><td>${s.goose_installed ? '<span class="badge on">found</span> <span class="hint mono">' + esc(s.goose_path) + '</span>' : '<span class="badge off">not found</span>'}</td></tr>
+        ${targetRow}
         <tr><td>Ollama <span class="hint">(only needed for local models)</span></td><td>${s.ollama_reachable ? '<span class="badge on">running</span>' : (s.ollama_installed ? '<span class="badge off">installed, not running</span>' : '<span class="badge off">not found</span>')}</td></tr>
       </tbody></table>
-      ${!s.goose_installed ? '<p class="hint">Install Goose: <a href="https://block.github.io/goose/docs/getting-started/installation" target="_blank" rel="noopener">block.github.io/goose</a></p>' : ''}
-      ${!s.ollama_reachable ? '<p class="hint">Want a local model instead of a cloud API key? Install/start Ollama: <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>, then run <span class="mono">ollama serve</span> and pull a model, e.g. <span class="mono">ollama pull llama3.1</span>.</p>' : ''}
-      <p class="hint">Goose config will be written to <span class="mono">${esc(s.config_path)}</span> (a backup of any existing file is kept alongside it).</p>
+      ${!ready ? '<p class="hint">Not found. See the <a href="#" id="wiz-goto-setup">Setup</a> tab for install commands.</p>' : ''}
+      ${!s.ollama_reachable ? '<p class="hint">Want a local model instead of a cloud API key? See the Setup tab for install commands, then run <span class="mono">ollama serve</span> and pull a model, e.g. <span class="mono">ollama pull llama3.1</span>.</p>' : ''}
+      ${target === 'goose'
+        ? `<p class="hint">Goose config will be written to <span class="mono">${esc(s.config_path)}</span> (a backup of any existing file is kept alongside it).</p>`
+        : `<p class="hint">OpenClaw's own config is managed through its CLI (<span class="mono">openclaw mcp add</span> / <span class="mono">openclaw agents add</span>) — the final step gives you the exact commands to run, rather than AgenticIAM editing OpenClaw's config file directly.</p>`}
       <div class="submit-row row">
         <button class="secondary" id="wiz-recheck">Re-check</button>
         <button id="wiz-next" ${ready ? '' : 'disabled'}>Next</button>
@@ -295,6 +309,12 @@ async function renderWizardStep1() {
     </div>`;
   document.getElementById('wiz-recheck').addEventListener('click', renderWizardStep1);
   document.getElementById('wiz-next').addEventListener('click', () => { wizardStep = 2; renderWizard(); });
+  document.querySelectorAll('input[name="wiz-target"]').forEach(r => r.addEventListener('change', (e) => {
+    wizardState.target = e.target.value;
+    renderWizardStep1();
+  }));
+  const gotoSetup = document.getElementById('wiz-goto-setup');
+  if (gotoSetup) gotoSetup.addEventListener('click', (e) => { e.preventDefault(); selectSection('setup'); });
 }
 
 async function renderWizardStep2() {
@@ -463,22 +483,24 @@ function renderWizardStep4() {
       <h3>Step 4 of 4 — Review & create</h3>
       <table><tbody>
         <tr><td>Name</td><td>${esc(wizardState.name)}</td></tr>
+        <tr><td>Target</td><td>${wizardState.target === 'goose' ? 'Goose' : 'OpenClaw'}</td></tr>
         <tr><td>Provider</td><td>${esc(providerLabel)}</td></tr>
         <tr><td>Model</td><td>${esc(wizardState.model)}</td></tr>
         <tr><td>Group</td><td>${esc(wizardState.group || '(none)')}</td></tr>
         <tr><td>Permissions</td><td class="mono">${esc(allPerms.join(', ') || '(none)')}</td></tr>
-        <tr><td>Goose config</td><td class="mono">${esc(s.config_path || '')}</td></tr>
+        ${wizardState.target === 'goose' ? `<tr><td>Goose config</td><td class="mono">${esc(s.config_path || '')}</td></tr>` : ''}
       </tbody></table>
       <label>Context window (tokens, optional — leave blank for the model's default)</label>
       <input id="wiz-context-limit" type="number" min="1" value="${esc(wizardState.contextLimit)}" placeholder="e.g. 32000">
-      <label>Command Goose should run for this agent's MCP tools</label>
+      <label>Command ${wizardState.target === 'goose' ? 'Goose' : 'OpenClaw'} should run for this agent's MCP tools</label>
       <input id="wiz-cmd" value="${esc(wizardState.cmd)}">
       <label>Arguments (space-separated)</label>
       <input id="wiz-args" value="${esc(wizardState.args)}">
+      ${wizardState.target === 'goose' ? `
       <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
         <input type="checkbox" id="wiz-default" ${wizardState.setDefault ? 'checked' : ''} style="width:auto">
         <span>Also set this as Goose's default provider/model/context window (affects <em>all</em> Goose sessions, not just this agent)</span>
-      </label>
+      </label>` : ''}
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
         <button id="wiz-create">Create agent</button>
@@ -492,13 +514,15 @@ function renderWizardStep4() {
   document.getElementById('wiz-create').addEventListener('click', async () => {
     wizardState.cmd = document.getElementById('wiz-cmd').value.trim();
     wizardState.args = document.getElementById('wiz-args').value.trim();
-    wizardState.setDefault = document.getElementById('wiz-default').checked;
+    const defaultCb = document.getElementById('wiz-default');
+    wizardState.setDefault = defaultCb ? defaultCb.checked : false;
     wizardState.contextLimit = document.getElementById('wiz-context-limit').value.trim();
     const msg = document.getElementById('wiz-create-msg');
     msg.innerHTML = 'Creating…';
     try {
       const res = await api('/v1/admin/goose/agents', { method: 'POST', json: {
         name: wizardState.name,
+        target: wizardState.target,
         model: wizardState.model,
         provider: wizardState.provider,
         api_key: wizardState.apiKey || undefined,
@@ -516,40 +540,148 @@ function renderWizardStep4() {
   });
 }
 
+function renderCommandShells(commands, copyKeyPrefix) {
+  const shells = [['bash', 'macOS / Linux (bash, zsh)'], ['powershell', 'Windows PowerShell'], ['cmd', 'Windows cmd.exe']];
+  return shells.map(([key, label]) => `
+    <div style="margin:10px 0">
+      <div class="hint">${esc(label)}</div>
+      <div class="row" style="align-items:stretch">
+        <div class="secret-box" style="flex:1;margin:4px 0">${esc(commands[key])}</div>
+        <button class="secondary" data-copy="${copyKeyPrefix}::${key}">Copy</button>
+      </div>
+    </div>`).join('');
+}
+
 function renderWizardStep5() {
   const body = document.getElementById('wizard-body');
   const r = wizardState.result;
-  const shells = [['bash', 'macOS / Linux (bash, zsh)'], ['powershell', 'Windows PowerShell'], ['cmd', 'Windows cmd.exe']];
+  const managerNote = r.is_manager
+    ? (r.target === 'goose'
+        ? (r.manager_recipe_path
+            ? `<p>Manager recipe written to <span class="mono">${esc(r.manager_recipe_path)}</span> — the dispatch system prompt loads automatically with the command below.</p>`
+            : `<div class="err">Couldn't write the manager recipe file: ${esc(r.manager_recipe_error)}. The agent was still created, but you'll need to paste the system prompt in by hand — see docs/manager-system-prompt.md.</div>`)
+        : (r.manager_soul_path
+            ? `<p>Manager <span class="mono">SOUL.md</span> written to <span class="mono">${esc(r.manager_soul_path)}</span> — the dispatch system prompt loads automatically once you run the commands below.</p>`
+            : `<div class="err">Couldn't write SOUL.md: ${esc(r.manager_soul_error)}. The agent was still created, but you'll need to paste the system prompt into its workspace's SOUL.md by hand — see docs/manager-system-prompt.md.</div>`))
+    : '';
+
+  if (r.target === 'openclaw') {
+    body.innerHTML = `
+      <div class="panel">
+        <h3>Agent created</h3>
+        <p class="ok">"${esc(r.identity.name)}" is ready.${r.group ? ` Added to group "${esc(r.group)}".` : ''}</p>
+        ${managerNote}
+        <p class="hint">Run these two commands (same machine as the OpenClaw Gateway) to finish wiring it up:</p>
+        <label>1. ${esc(r.openclaw_commands.register_tools.title)}</label>
+        ${renderCommandShells(r.openclaw_commands.register_tools, 'register_tools')}
+        <label style="margin-top:18px">2. ${esc(r.openclaw_commands.create_agent.title)}</label>
+        ${renderCommandShells(r.openclaw_commands.create_agent, 'create_agent')}
+        <p class="hint">Then run <span class="mono">openclaw gateway restart</span> and either bind a channel to this new agent or chat with it directly from the Control UI (<span class="mono">openclaw dashboard</span>).</p>
+        <div class="submit-row row">
+          <button id="wiz-another">Create another agent</button>
+        </div>
+      </div>`;
+    body.querySelectorAll('button[data-copy]').forEach(btn => btn.addEventListener('click', () => {
+      const [group, key] = btn.dataset.copy.split('::');
+      navigator.clipboard.writeText(r.openclaw_commands[group][key]);
+    }));
+    document.getElementById('wiz-another').addEventListener('click', () => { resetWizard(); renderWizard(); });
+    return;
+  }
+
   body.innerHTML = `
     <div class="panel">
       <h3>Agent created</h3>
       <p class="ok">"${esc(r.identity.name)}" is ready.${r.group ? ` Added to group "${esc(r.group)}".` : ''}</p>
-      ${r.is_manager
-        ? (r.manager_recipe_path
-            ? `<p>Manager recipe written to <span class="mono">${esc(r.manager_recipe_path)}</span> — the dispatch system prompt loads automatically with the command below.</p>`
-            : `<div class="err">Couldn't write the manager recipe file: ${esc(r.manager_recipe_error)}. The agent was still created, but you'll need to paste the system prompt in by hand — see docs/manager-system-prompt.md.</div>`)
-        : ''}
+      ${managerNote}
       ${r.goose_config_written
         ? `<p>Goose extension registered at <span class="mono">${esc(r.config_path)}</span>.</p>`
         : `<div class="err">Couldn't write Goose config automatically: ${esc(r.goose_config_error)}</div>
            <p>Add this to <span class="mono">${esc(r.config_path)}</span> by hand:</p>
            <textarea rows="9" readonly>${esc(r.manual_extension_snippet)}</textarea>`}
       <label>Run this to start chatting with your agent — pick the line for your terminal:</label>
-      ${shells.map(([key, label]) => `
-        <div style="margin:10px 0">
-          <div class="hint">${esc(label)}</div>
-          <div class="row" style="align-items:stretch">
-            <div class="secret-box" style="flex:1;margin:4px 0">${esc(r.launch_commands[key])}</div>
-            <button class="secondary" data-copy="${key}">Copy</button>
-          </div>
-        </div>`).join('')}
+      ${renderCommandShells(r.launch_commands, 'launch')}
       <div class="submit-row row">
         <button id="wiz-another">Create another agent</button>
       </div>
     </div>`;
-  body.querySelectorAll('button[data-copy]').forEach(btn => btn.addEventListener('click', () =>
-    navigator.clipboard.writeText(r.launch_commands[btn.dataset.copy])));
+  body.querySelectorAll('button[data-copy]').forEach(btn => btn.addEventListener('click', () => {
+    const key = btn.dataset.copy.split('::')[1];
+    navigator.clipboard.writeText(r.launch_commands[key]);
+  }));
   document.getElementById('wiz-another').addEventListener('click', () => { resetWizard(); renderWizard(); });
+}
+
+async function renderSetup() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<h2>Setup</h2><div id="content">Loading…</div>';
+  const content = document.getElementById('content');
+  const shells = [['bash', 'macOS / Linux (bash, zsh)'], ['powershell', 'Windows PowerShell'], ['cmd', 'Windows cmd.exe / notes']];
+  try {
+    const commands = await api('/v1/admin/setup/install-commands');
+    const tools = [
+      ['ollama', 'Ollama', 'Runs models locally — needed for local (free, private) models with either Goose or OpenClaw.'],
+      ['goose', 'Goose', 'A local AI agent CLI — one runtime option for the New Agent wizard.'],
+      ['openclaw', 'OpenClaw', 'A self-hosted gateway connecting chat apps (Discord, Telegram, WhatsApp, ...) to AI agents — the other runtime option for the New Agent wizard.'],
+    ];
+    content.innerHTML = `
+      <p class="hint">One-time install commands for the tools the New Agent wizard drives. Run them on the machine where <span class="mono">agenticiam serve</span>/<span class="mono">gui</span> is running.</p>
+      ${tools.map(([key, label, hint]) => `
+        <div class="panel">
+          <h3>${esc(label)}</h3>
+          <p class="hint">${esc(hint)}</p>
+          ${shells.map(([shellKey, shellLabel]) => `
+            <div style="margin:8px 0">
+              <div class="hint">${esc(shellLabel)}</div>
+              <div class="row" style="align-items:stretch">
+                <div class="secret-box" style="flex:1;margin:4px 0;white-space:pre-wrap">${esc(commands[key][shellKey])}</div>
+                <button class="secondary" data-copy-tool="${key}::${shellKey}">Copy</button>
+              </div>
+            </div>`).join('')}
+        </div>`).join('')}
+      <div class="panel">
+        <h3>Model recommendations for your hardware</h3>
+        <p class="hint">Sizes are approximate (Q4_K_M quantization, Ollama's common default) — a starting point, not an exact fit.</p>
+        <label>System RAM (GB)</label>
+        <input id="setup-ram" type="number" min="1" placeholder="e.g. 64">
+        <label>GPU VRAM (GB, optional — leave blank for CPU-only / integrated graphics)</label>
+        <input id="setup-vram" type="number" min="0" placeholder="e.g. 8">
+        <div class="submit-row"><button id="setup-recommend">Recommend models</button></div>
+        <div id="setup-recommendations"></div>
+      </div>`;
+    content.querySelectorAll('button[data-copy-tool]').forEach(btn => btn.addEventListener('click', () => {
+      const [tool, shellKey] = btn.dataset.copyTool.split('::');
+      navigator.clipboard.writeText(commands[tool][shellKey]);
+    }));
+    document.getElementById('setup-recommend').addEventListener('click', async () => {
+      const out = document.getElementById('setup-recommendations');
+      const ram = parseFloat(document.getElementById('setup-ram').value);
+      const vram = document.getElementById('setup-vram').value.trim();
+      if (!ram || ram <= 0) { out.innerHTML = '<div class="err">Enter your system RAM in GB.</div>'; return; }
+      out.innerHTML = 'Loading…';
+      try {
+        const rec = await api('/v1/admin/setup/recommend-models', { method: 'POST', json: {
+          ram_gb: ram, vram_gb: vram ? parseFloat(vram) : undefined,
+        } });
+        const renderTier = (title, hint, models) => `
+          <h4 style="margin-top:16px">${esc(title)}</h4>
+          <p class="hint">${esc(hint)}</p>
+          ${models.length ? `<table><thead><tr><th>Model</th><th>Params</th><th>Tags</th><th>~Size</th><th></th></tr></thead><tbody>
+            ${models.map(m => `<tr>
+              <td class="mono">${esc(m.id)}</td><td>${esc(m.family)}</td><td class="hint">${esc(m.tags.join(', '))}</td>
+              <td>${m.approx_size_gb} GB</td>
+              <td><button class="secondary" data-copy-model="${esc(m.pull_command)}">Copy pull command</button></td>
+            </tr>`).join('')}
+          </tbody></table>` : '<p class="hint">Nothing in this tier for your hardware.</p>'}`;
+        out.innerHTML = `
+          ${renderTier('Fast (fully GPU-accelerated)', 'Whole model fits in VRAM with headroom for context.', rec.fast)}
+          ${renderTier('Usable (partial GPU + CPU RAM)', 'Runs, but slower — part or all of it spills into system RAM.', rec.usable)}
+          <p class="hint" style="margin-top:12px">${esc(rec.note)}</p>`;
+        out.querySelectorAll('button[data-copy-model]').forEach(btn => btn.addEventListener('click', () =>
+          navigator.clipboard.writeText(btn.dataset.copyModel)));
+      } catch (err) { out.innerHTML = errBox(err); }
+    });
+  } catch (err) { content.innerHTML = errBox(err); }
 }
 
 async function renderIdentities() {
@@ -725,26 +857,42 @@ async function renderGroupStartCommands(name) {
   const shells = [['bash', 'macOS / Linux (bash, zsh)'], ['powershell', 'Windows PowerShell'], ['cmd', 'Windows cmd.exe']];
   try {
     const res = await api('/v1/admin/groups/' + encodeURIComponent(name) + '/launch-commands');
+    const renderShellRows = (commands, copyKey) => shells.map(([key, label]) => `
+      <div style="margin:8px 0">
+        <div class="hint">${esc(label)}</div>
+        <div class="row" style="align-items:stretch">
+          <div class="secret-box" style="flex:1;margin:4px 0">${esc(commands[key])}</div>
+          <button class="secondary" data-copy-cmd="${copyKey}::${key}">Copy</button>
+        </div>
+      </div>`).join('');
     wrap.innerHTML = `
       <h3 style="margin-top:22px">Start "${esc(name)}"</h3>
-      <p class="hint">One set of commands per teammate — open a terminal tab per agent and paste the line for your shell. Agents not created through the Goose wizard have no start command and are skipped.</p>
-      ${res.agents.map(a => a.launch_commands ? `
-        <div class="panel">
-          <strong>${esc(a.name)}</strong>${a.goose && a.goose.is_manager ? ' <span class="badge on">manager — dispatch prompt preloaded</span>' : ''}
-          ${shells.map(([key, label]) => `
-            <div style="margin:8px 0">
-              <div class="hint">${esc(label)}</div>
-              <div class="row" style="align-items:stretch">
-                <div class="secret-box" style="flex:1;margin:4px 0">${esc(a.launch_commands[key])}</div>
-                <button class="secondary" data-copy-cmd="${esc(a.name)}::${key}">Copy</button>
-              </div>
-            </div>`).join('')}
-        </div>` : `<div class="panel hint">${esc(a.name)}: not a Goose agent, no start command.</div>`
-      ).join('') || '<p class="hint">No members yet.</p>'}`;
+      <p class="hint">One set of commands per teammate — open a terminal tab per agent and paste the line for your shell. Agents not created through the wizard have no start command and are skipped.</p>
+      ${res.agents.map(a => {
+        if (a.target === 'openclaw' && a.openclaw_commands) {
+          return `
+            <div class="panel">
+              <strong>${esc(a.name)}</strong> <span class="hint">(OpenClaw)</span>${a.goose && a.goose.is_manager ? ' <span class="badge on">manager — dispatch prompt preloaded</span>' : ''}
+              <label style="margin-top:8px">1. ${esc(a.openclaw_commands.register_tools.title)}</label>
+              ${renderShellRows(a.openclaw_commands.register_tools, `${esc(a.name)}::register_tools`)}
+              <label>2. ${esc(a.openclaw_commands.create_agent.title)}</label>
+              ${renderShellRows(a.openclaw_commands.create_agent, `${esc(a.name)}::create_agent`)}
+            </div>`;
+        }
+        if (a.launch_commands) {
+          return `
+            <div class="panel">
+              <strong>${esc(a.name)}</strong>${a.goose && a.goose.is_manager ? ' <span class="badge on">manager — dispatch prompt preloaded</span>' : ''}
+              ${renderShellRows(a.launch_commands, `${esc(a.name)}::launch`)}
+            </div>`;
+        }
+        return `<div class="panel hint">${esc(a.name)}: not a Goose/OpenClaw agent, no start command.</div>`;
+      }).join('') || '<p class="hint">No members yet.</p>'}`;
     wrap.querySelectorAll('button[data-copy-cmd]').forEach(btn => btn.addEventListener('click', () => {
-      const [agentName, shellKey] = btn.dataset.copyCmd.split('::');
+      const [agentName, group, shellKey] = btn.dataset.copyCmd.split('::');
       const agent = res.agents.find(a => a.name === agentName);
-      navigator.clipboard.writeText(agent.launch_commands[shellKey]);
+      const text = group === 'launch' ? agent.launch_commands[shellKey] : agent.openclaw_commands[group][shellKey];
+      navigator.clipboard.writeText(text);
     }));
   } catch (err) { wrap.innerHTML = errBox(err); }
 }

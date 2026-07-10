@@ -15,7 +15,7 @@ from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request
 
-from . import audit, db as db_module, directory as directory_module, goose, oauth, paths, policy, tokens
+from . import audit, db as db_module, directory as directory_module, goose, hardware, oauth, openclaw, paths, policy, tokens
 
 ADMIN_PERMISSION = "iam:admin"
 BOOTSTRAP_ROLE = "domain-admin"
@@ -358,19 +358,48 @@ def create_app(db_path=None) -> Flask:
             identity = directory.get_identity(name)
         except directory_module.NotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
-        goose_meta = (identity.get("metadata") or {}).get("goose")
+        metadata = identity.get("metadata") or {}
+        goose_meta = metadata.get("goose")
+        target = metadata.get("target", "goose")
 
         directory.delete_identity(name, actor=actor)
 
         if not goose_meta:
             return "", 204
 
+        extension_id = goose.slugify(name)
+        result = {"identity": name, "extension_id": extension_id, "target": target}
+
+        if target == "openclaw":
+            # OpenClaw's own config is JSON5 we don't parse/write directly
+            # (see openclaw.py) — the identity's directory record is gone,
+            # but the openclaw mcp/agents entries are OpenClaw's CLI's to
+            # remove.
+            soul_path = (metadata.get("openclaw") or {}).get("manager_soul_path")
+            if soul_path:
+                try:
+                    Path(soul_path).unlink(missing_ok=True)
+                    result["manager_soul_removed"] = True
+                except OSError as exc:
+                    result["manager_soul_removed"] = False
+                    result["manager_soul_error"] = str(exc)
+            result["manual_removal_instructions"] = (
+                f"Run `openclaw mcp unset {extension_id}` to remove its registered tools, "
+                f"and check `openclaw agents list` for an `{extension_id}` persona to remove "
+                "if you no longer want its workspace/session history."
+            )
+            audit.log(
+                directory.conn, "goose.cleanup_extension", "partial",
+                actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+                resource=f"identity:{name}",
+            )
+            return jsonify(result), 200
+
         # The identity is gone from the directory, but it may still be
         # registered as a Goose MCP extension in config.yaml, pointing at an
         # AGENTICIAM_TOKEN that no longer authenticates — clean that up too
         # rather than leaving a dead entry behind.
-        extension_id = goose.slugify(name)
-        result = {"identity": name, "extension_id": extension_id, "config_path": str(goose.config_path())}
+        result["config_path"] = str(goose.config_path())
 
         recipe_path = goose_meta.get("manager_recipe_path")
         if recipe_path:
@@ -485,17 +514,35 @@ def create_app(db_path=None) -> Flask:
             return jsonify({"error": str(exc)}), 404
         agents = []
         for member in members:
-            goose_meta = (member.get("metadata") or {}).get("goose")
+            metadata = member.get("metadata") or {}
+            goose_meta = metadata.get("goose")
+            target = metadata.get("target", "goose")
             commands = None
+            openclaw_commands = None
             if goose_meta and goose_meta.get("provider") and goose_meta.get("model"):
-                commands = goose.launch_commands(
-                    member["name"], goose_meta["provider"], goose_meta["model"],
-                    context_limit=goose_meta.get("context_limit"),
-                    recipe_path=goose_meta.get("manager_recipe_path"),
-                )
-            agents.append(
-                {"name": member["name"], "kind": member["kind"], "goose": goose_meta, "launch_commands": commands}
-            )
+                if target == "openclaw":
+                    # The AGENTICIAM_TOKEN, like a provider API key, is
+                    # never persisted anywhere — it only ever appeared once,
+                    # in this agent's original creation response. Issue a
+                    # fresh one (Identities tab -> rotate/issue key) and
+                    # substitute it here if you need to re-run this command.
+                    cmd, args = _self_command()
+                    openclaw_commands = {
+                        "register_tools": {"title": "Register AgenticIAM's tools with OpenClaw",
+                                            **openclaw.mcp_add_commands(member["name"], cmd, args, "<issue-a-new-api-key-for-this-identity>")},
+                        "create_agent": {"title": "Create the OpenClaw agent persona",
+                                          **openclaw.agent_add_command(member["name"], goose_meta["provider"], goose_meta["model"])},
+                    }
+                else:
+                    commands = goose.launch_commands(
+                        member["name"], goose_meta["provider"], goose_meta["model"],
+                        context_limit=goose_meta.get("context_limit"),
+                        recipe_path=goose_meta.get("manager_recipe_path"),
+                    )
+            agents.append({
+                "name": member["name"], "kind": member["kind"], "goose": goose_meta, "target": target,
+                "launch_commands": commands, "openclaw_commands": openclaw_commands,
+            })
         return jsonify({"group": name, "agents": agents})
 
     # ------------------------------------------------------------ admin: roles
@@ -604,10 +651,41 @@ def create_app(db_path=None) -> Flask:
                 "ollama_installed": goose.find_ollama_binary() is not None,
                 "ollama_reachable": ollama_reachable,
                 "config_path": str(goose.config_path()),
+                "openclaw_installed": openclaw.find_openclaw_binary() is not None,
+                "openclaw_path": openclaw.find_openclaw_binary(),
                 "suggested_cmd": cmd,
                 "suggested_args": args,
             }
         )
+
+    @app.get("/v1/admin/setup/install-commands")
+    @require_permission(ADMIN_PERMISSION)
+    def setup_install_commands():
+        return jsonify(
+            {
+                "ollama": goose.ollama_install_commands(),
+                "goose": goose.goose_install_commands(),
+                "openclaw": openclaw.install_commands(),
+            }
+        )
+
+    @app.post("/v1/admin/setup/recommend-models")
+    @require_permission(ADMIN_PERMISSION)
+    def setup_recommend_models():
+        data = request.get_json(force=True)
+        try:
+            ram_gb = float(data.get("ram_gb"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_request", "error_description": "ram_gb is required and must be a number"}), 400
+        vram_gb = data.get("vram_gb")
+        try:
+            vram_gb = float(vram_gb) if vram_gb not in (None, "") else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_request", "error_description": "vram_gb must be a number"}), 400
+        try:
+            return jsonify(hardware.recommend_models(ram_gb, vram_gb))
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "error_description": str(exc)}), 400
 
     @app.post("/v1/admin/goose/models")
     @require_permission(ADMIN_PERMISSION)
@@ -630,12 +708,16 @@ def create_app(db_path=None) -> Flask:
         name = (data.get("name") or "").strip()
         if not name:
             return jsonify({"error": "invalid_request", "error_description": "name is required"}), 400
+        target = (data.get("target") or "goose").strip()
+        if target not in ("goose", "openclaw"):
+            return jsonify({"error": "invalid_request", "error_description": "target must be 'goose' or 'openclaw'"}), 400
         permissions = [p.strip() for p in (data.get("permissions") or []) if p and p.strip()]
         model = (data.get("model") or "").strip() or None
         provider = (data.get("provider") or "ollama").strip()
         # api_key is used only to build the launch command below — it is
-        # never written to config.yaml or stored in the directory, matching
-        # Goose's own guidance against keeping provider keys in plaintext files.
+        # never written to config.yaml/openclaw.json or stored in the
+        # directory, matching Goose's own guidance against keeping provider
+        # keys in plaintext files (and kept to the same policy for OpenClaw).
         api_key = data.get("api_key") or None
         context_limit = data.get("context_limit")
         try:
@@ -653,33 +735,49 @@ def create_app(db_path=None) -> Flask:
         # A "manager" isn't a hardcoded role — it's just an agent that was
         # granted dispatch: permissions in the wizard's "Manager
         # permissions" step. That's also the signal for preloading the
-        # dispatch system prompt below.
+        # dispatch system prompt below (as a Goose recipe or an OpenClaw
+        # SOUL.md, depending on target — dispatch itself always shells out
+        # to `goose run --no-session` regardless of target, since that's
+        # orthogonal to which runtime the agent's own interactive session
+        # uses; see iam_dispatch_to_agent).
         is_manager = any(p == "dispatch:*" or p.startswith("dispatch:") for p in permissions)
         recipe_path = None
         recipe_error = None
+        soul_path = None
+        soul_error = None
         if is_manager:
             try:
-                recipe_path = goose.write_manager_recipe(name)
+                if target == "goose":
+                    recipe_path = goose.write_manager_recipe(name)
+                else:
+                    soul_path = openclaw.write_manager_soul(name)
             except OSError as exc:
-                recipe_error = str(exc)
+                if target == "goose":
+                    recipe_error = str(exc)
+                else:
+                    soul_error = str(exc)
 
         directory = get_directory()
         actor = _actor()
         role_name = f"{name}-role"
         try:
             try:
-                role = directory.create_role(role_name, f"Permissions for Goose agent {name}", actor=actor)
+                role = directory.create_role(role_name, f"Permissions for {name}", actor=actor)
             except directory_module.ConflictError:
                 role = directory.get_role(role_name)
             for perm in permissions:
                 directory.grant_permission(role["name"], perm, actor=actor)
             identity = directory.create_identity(
                 "agent", name, display_name=name,
-                metadata={"goose": {
-                    "provider": provider, "model": model, "context_limit": context_limit,
-                    "is_manager": is_manager,
-                    "manager_recipe_path": str(recipe_path) if recipe_path else None,
-                }},
+                metadata={
+                    "goose": {
+                        "provider": provider, "model": model, "context_limit": context_limit,
+                        "is_manager": is_manager,
+                        "manager_recipe_path": str(recipe_path) if recipe_path else None,
+                    },
+                    "target": target,
+                    "openclaw": {"manager_soul_path": str(soul_path) if soul_path else None} if target == "openclaw" else None,
+                },
                 actor=actor,
             )
             directory.assign_role(role["name"], "identity", identity["name"], actor=actor)
@@ -696,50 +794,62 @@ def create_app(db_path=None) -> Flask:
             return jsonify({"error": str(exc)}), 400
 
         extension_id = goose.slugify(name)
-        # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL/GOOSE_CONTEXT_LIMIT into
-        # config.yaml, a per-invocation env override would just be redundant
-        launch_commands = goose.launch_commands(
-            name,
-            provider,
-            None if set_as_default else model,
-            context_limit=None if set_as_default else context_limit,
-            api_key=api_key,
-            recipe_path=recipe_path,
-        )
-
         result = {
             "identity": identity,
             "role": role_name,
             "permissions": permissions,
             "api_key_id": key["id"],
             "extension_id": extension_id,
-            "config_path": str(goose.config_path()),
-            "launch_commands": launch_commands,
+            "target": target,
             "group": group_name,
             "is_manager": is_manager,
-            "manager_recipe_path": str(recipe_path) if recipe_path else None,
-            "manager_recipe_error": recipe_error,
         }
 
-        try:
-            cfg = goose.load_config()
-            cfg = goose.register_extension(cfg, extension_id, name, cmd, args, key["key"])
-            if set_as_default and model:
-                cfg = goose.set_default_provider_model(cfg, provider, model, context_limit=context_limit)
-            written_path = goose.save_config(cfg)
-            result["goose_config_written"] = True
-            result["config_path"] = str(written_path)
-        except OSError as exc:
-            result["goose_config_written"] = False
-            result["goose_config_error"] = str(exc)
-            result["manual_extension_snippet"] = goose.extension_snippet_yaml(extension_id, name, cmd, args, key["key"])
+        if target == "goose":
+            # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL/GOOSE_CONTEXT_LIMIT
+            # into config.yaml, a per-invocation env override would just be redundant
+            result["config_path"] = str(goose.config_path())
+            result["launch_commands"] = goose.launch_commands(
+                name,
+                provider,
+                None if set_as_default else model,
+                context_limit=None if set_as_default else context_limit,
+                api_key=api_key,
+                recipe_path=recipe_path,
+            )
+            result["manager_recipe_path"] = str(recipe_path) if recipe_path else None
+            result["manager_recipe_error"] = recipe_error
 
+            try:
+                cfg = goose.load_config()
+                cfg = goose.register_extension(cfg, extension_id, name, cmd, args, key["key"])
+                if set_as_default and model:
+                    cfg = goose.set_default_provider_model(cfg, provider, model, context_limit=context_limit)
+                written_path = goose.save_config(cfg)
+                result["goose_config_written"] = True
+                result["config_path"] = str(written_path)
+            except OSError as exc:
+                result["goose_config_written"] = False
+                result["goose_config_error"] = str(exc)
+                result["manual_extension_snippet"] = goose.extension_snippet_yaml(extension_id, name, cmd, args, key["key"])
+        else:
+            # OpenClaw ships its own CLI for editing its JSON5 config safely
+            # (openclaw mcp add / openclaw agents add) — we generate the
+            # commands rather than writing openclaw.json ourselves.
+            result["openclaw_commands"] = {
+                "register_tools": {"title": "Register AgenticIAM's tools with OpenClaw", **openclaw.mcp_add_commands(name, cmd, args, key["key"])},
+                "create_agent": {"title": "Create the OpenClaw agent persona", **openclaw.agent_add_command(name, provider, model)},
+            }
+            result["manager_soul_path"] = str(soul_path) if soul_path else None
+            result["manager_soul_error"] = soul_error
+
+        audit_success = result.get("goose_config_written", True) and soul_error is None
         audit.log(
             directory.conn, "goose.create_agent",
-            "success" if result.get("goose_config_written") else "partial",
+            "success" if audit_success else "partial",
             actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
             resource=f"identity:{name}",
-            detail={"provider": provider, "model": model, "permissions": permissions, "context_limit": context_limit},
+            detail={"target": target, "provider": provider, "model": model, "permissions": permissions, "context_limit": context_limit},
         )
         return jsonify(result), 201
 

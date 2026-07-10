@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from agenticiam import api as api_module
-from agenticiam import db as db_module, goose, tokens
+from agenticiam import db as db_module, goose, openclaw, tokens
 from agenticiam.api import create_app
 from agenticiam.directory import Directory
 
@@ -58,6 +58,13 @@ def goose_config_path(tmp_path, monkeypatch):
     path = tmp_path / "goose-config.yaml"
     monkeypatch.setattr(goose, "config_path", lambda: path)
     return path
+
+
+@pytest.fixture
+def openclaw_workspace_root(tmp_path, monkeypatch):
+    root = tmp_path / "openclaw-workspaces"
+    monkeypatch.setattr(openclaw, "workspace_path", lambda name: root / f"workspace-{openclaw.slugify(name)}")
+    return root
 
 
 def test_goose_status_reports_tool_presence(client, admin_headers, monkeypatch, goose_config_path):
@@ -129,6 +136,149 @@ def test_goose_models_google_with_key(client, admin_headers, monkeypatch):
 def test_goose_models_unknown_provider(client, admin_headers):
     resp = client.post("/v1/admin/goose/models", json={"provider": "not-a-real-provider"}, headers=admin_headers)
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------- setup wizard
+
+def test_setup_install_commands_returns_all_three_tools(client, admin_headers):
+    resp = client.get("/v1/admin/setup/install-commands", headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert set(body.keys()) == {"ollama", "goose", "openclaw"}
+    for tool in body.values():
+        assert set(tool.keys()) == {"bash", "powershell", "cmd"}
+
+
+def test_setup_install_commands_requires_admin(client, directory):
+    identity = directory.create_identity("agent", "bot1")
+    token = tokens.issue_access_token(identity, [])
+    resp = client.get("/v1/admin/setup/install-commands", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403
+
+
+def test_recommend_models_endpoint(client, admin_headers):
+    resp = client.post("/v1/admin/setup/recommend-models", json={"ram_gb": 64, "vram_gb": 8}, headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    fast_ids = {m["id"] for m in body["fast"]}
+    assert "llama3.1:8b" in fast_ids
+
+
+def test_recommend_models_requires_ram_gb(client, admin_headers):
+    resp = client.post("/v1/admin/setup/recommend-models", json={"vram_gb": 8}, headers=admin_headers)
+    assert resp.status_code == 400
+
+
+def test_recommend_models_vram_optional(client, admin_headers):
+    resp = client.post("/v1/admin/setup/recommend-models", json={"ram_gb": 32}, headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()["fast"] == []
+
+
+def test_goose_status_reports_openclaw_presence(client, admin_headers, monkeypatch, goose_config_path):
+    monkeypatch.setattr(openclaw, "find_openclaw_binary", lambda: "/usr/local/bin/openclaw")
+    resp = client.get("/v1/admin/goose/status", headers=admin_headers)
+    body = resp.get_json()
+    assert body["openclaw_installed"] is True
+    assert body["openclaw_path"] == "/usr/local/bin/openclaw"
+
+
+# ---------------------------------------------------------------- openclaw target
+
+def test_create_openclaw_agent_returns_commands_not_goose_launch(
+    client, admin_headers, goose_config_path, openclaw_workspace_root
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "boss", "target": "openclaw", "permissions": ["dispatch:*"],
+            "provider": "ollama", "model": "llama3.1:8b",
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert body["target"] == "openclaw"
+    assert "launch_commands" not in body
+    commands = body["openclaw_commands"]
+    assert "openclaw mcp add boss" in commands["register_tools"]["bash"]
+    assert "AGENTICIAM_TOKEN=" in commands["register_tools"]["bash"]
+    assert 'openclaw agents add boss --model "ollama/llama3.1:8b"' in commands["create_agent"]["bash"]
+
+    # is_manager (dispatch:*) writes a SOUL.md, not a goose recipe
+    assert body["is_manager"] is True
+    soul_path = body["manager_soul_path"]
+    assert soul_path is not None
+    assert "iamDispatchToAgent" in open(soul_path, encoding="utf-8").read()
+
+    # nothing was written to goose's config.yaml for an openclaw-target agent
+    assert not goose_config_path.exists()
+
+    identity = client.get("/v1/admin/identities/boss", headers=admin_headers).get_json()
+    assert identity["metadata"]["target"] == "openclaw"
+    assert identity["metadata"]["openclaw"]["manager_soul_path"] == soul_path
+
+
+def test_create_openclaw_agent_without_manager_permission_has_no_soul(
+    client, admin_headers, goose_config_path, openclaw_workspace_root
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "intern", "target": "openclaw", "permissions": [], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    body = resp.get_json()
+    assert body["is_manager"] is False
+    assert body["manager_soul_path"] is None
+
+
+def test_create_agent_invalid_target_rejected(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "x", "target": "not-a-real-target", "permissions": [], "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_delete_openclaw_manager_identity_removes_soul_and_gives_cli_instructions(
+    client, admin_headers, goose_config_path, openclaw_workspace_root
+):
+    create = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "boss", "target": "openclaw", "permissions": ["dispatch:*"], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    ).get_json()
+    soul_path = create["manager_soul_path"]
+    assert os.path.exists(soul_path)
+
+    resp = client.delete("/v1/admin/identities/boss", headers=admin_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["target"] == "openclaw"
+    assert body["manager_soul_removed"] is True
+    assert not os.path.exists(soul_path)
+    assert "openclaw mcp unset boss" in body["manual_removal_instructions"]
+    # no goose config.yaml fields at all for an openclaw-target delete
+    assert "goose_config_updated" not in body
+
+
+def test_group_launch_commands_openclaw_member_uses_openclaw_commands(
+    client, admin_headers, goose_config_path, openclaw_workspace_root
+):
+    client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "marketing-boss", "target": "openclaw", "permissions": [], "provider": "ollama",
+            "model": "llama3.1:8b", "group": "marketing",
+        },
+        headers=admin_headers,
+    )
+    resp = client.get("/v1/admin/groups/marketing/launch-commands", headers=admin_headers)
+    boss = next(a for a in resp.get_json()["agents"] if a["name"] == "marketing-boss")
+    assert boss["target"] == "openclaw"
+    assert boss["launch_commands"] is None
+    assert "openclaw agents add marketing-boss" in boss["openclaw_commands"]["create_agent"]["bash"]
 
 
 def test_create_goose_agent_end_to_end(client, admin_headers, goose_config_path):

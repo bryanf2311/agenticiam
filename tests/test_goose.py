@@ -221,6 +221,21 @@ def test_launch_commands_ollama_ignores_api_key():
         assert "should-not-appear" not in variant
 
 
+def test_ollama_install_commands_has_all_shells():
+    commands = goose.ollama_install_commands()
+    assert "ollama.com/install.sh" in commands["bash"]
+    assert "Ollama.Ollama" in commands["powershell"]
+    assert "Ollama.Ollama" in commands["cmd"]
+
+
+def test_goose_install_commands_has_all_shells():
+    commands = goose.goose_install_commands()
+    assert "download_cli.sh" in commands["bash"]
+    assert "CONFIGURE=false" in commands["bash"]
+    assert "download_cli.ps1" in commands["powershell"]
+    assert "cmd" in commands
+
+
 def test_launch_commands_with_recipe_path_uses_goose_run_interactive():
     commands = goose.launch_commands("boss", recipe_path="/home/user/.config/goose/agenticiam-recipes/boss.yaml")
     for shell in ("bash", "powershell"):

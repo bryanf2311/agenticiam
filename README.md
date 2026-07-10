@@ -116,6 +116,33 @@ curl -X POST http://127.0.0.1:8765/v1/authorize \
 # => {"allow": true, "subject": "openclaw-gateway", "action": "shell:exec"}
 ```
 
+## Setup tab (install Ollama, Goose, OpenClaw + hardware-based model picks)
+
+The **Setup** tab in the web console (first item in the nav) is a
+one-stop page for getting the tools the New Agent wizard drives actually
+installed on the machine running `agenticiam serve`/`gui`:
+
+- Copy-ready install commands (bash/PowerShell) for **Ollama**, **Goose**,
+  and **OpenClaw** — pulled from each project's own documented install
+  method (Ollama's `install.sh`/winget package, Goose's CLI download
+  script, OpenClaw's `install.sh`/`install.ps1` + `openclaw onboard`), not
+  guessed.
+- A small hardware form (system RAM, optional GPU VRAM) that sorts a
+  curated list of popular Ollama models into two tiers: **Fast** (the
+  whole model fits in VRAM with headroom for context — fully
+  GPU-accelerated) and **Usable** (too big for VRAM alone but fits once
+  spilling into system RAM is allowed — works, just slower). Each
+  recommendation comes with its `ollama pull <model>` command. Sizes are
+  approximate (Q4_K_M, Ollama's common default quantization) — a starting
+  point, not an exact fit, and this is a static curated table (there's no
+  reliable API for "how much VRAM does model X need"), not a live catalog.
+
+Example: 64GB RAM + an 8GB GPU puts every 7-9B model (Llama 3.1 8B, Qwen
+2.5 7B/Coder 7B, Mistral 7B, Gemma 2 9B) in the Fast tier, and 14B-32B
+models plus even a 70B in Usable — GPU-offloaded where it fits, spilling
+into your 64GB of system RAM for the rest, meaningfully slower but not
+unusable for non-realtime tasks.
+
 ## Web admin console
 
 `agenticiam serve` (and `agenticiam gui`, which is just `serve` plus
@@ -132,14 +159,22 @@ It's a thin client over the same `/v1/admin/*` REST API described below —
 anything you can do in the browser you can also script against those
 endpoints directly.
 
-## New Agent wizard (Goose + Ollama/Anthropic/Google)
+## New Agent wizard (Goose or OpenClaw + Ollama/Anthropic/Google)
 
 The **+ New Agent** button in the web console is a 4-step wizard that goes
 from nothing to a running, permissioned AI agent:
 
-1. **Checks prerequisites** — is [Goose](https://block.github.io/goose/)
-   on `PATH`. Ollama is checked too but only needed if you pick it as a
-   provider in the next step.
+1. **Target & prerequisites** — pick which runtime this agent lives in:
+   - **Goose** — a single interactive local session per agent
+     (`goose session` / `goose run`). Checks whether
+     [Goose](https://block.github.io/goose/) is on `PATH`.
+   - **OpenClaw** — a persistent gateway persona reachable from chat apps
+     (Discord, Telegram, WhatsApp, ...) via [OpenClaw](https://openclaw.ai/).
+     Checks whether `openclaw` is on `PATH`.
+
+   Ollama is checked too but only needed if you pick it as a provider in
+   the next step. Not installed? See the Setup tab above for install
+   commands for all three.
 2. **Name, provider & model** — pick a name, then a provider:
    - **Ollama** (local, free) — models are listed live from Ollama's local API.
    - **Anthropic** (Claude) or **Google** (Gemini) — paste an API key and
@@ -166,6 +201,18 @@ from nothing to a running, permissioned AI agent:
    — or, for a manager (see below), a `goose run --recipe ...
    --interactive` command instead, so its dispatch system prompt loads
    automatically.
+
+   **For an OpenClaw-target agent**, step 4 looks the same but AgenticIAM
+   never touches OpenClaw's own config file — it's JSON5 (comments,
+   trailing commas) that Python's stdlib `json` can't round-trip safely,
+   and OpenClaw ships a CLI built for exactly this. Instead you get two
+   commands to run: `openclaw mcp add <name> --command ... --env
+   AGENTICIAM_TOKEN=...` (registers AgenticIAM's tools, the OpenClaw
+   equivalent of Goose's `config.yaml` extension) and `openclaw agents add
+   <name> --model <provider>/<model> --non-interactive --workspace ...`
+   (creates the persona). A manager agent gets a `SOUL.md` written into
+   that workspace directory instead of a Goose recipe — same dispatch
+   system prompt, OpenClaw's own mechanism for a persona's system prompt.
 
 Two things worth knowing:
 
@@ -201,15 +248,21 @@ Two things worth knowing:
   with none, it opens the browser. So the wizard always points the
   extension at whichever binary is actually running the server, and it
   works whether you have one executable on disk or both.
-- **Deleting an agent cleans up after itself.** If the identity was
-  registered as a Goose extension, deleting it also removes that
-  `extensions` entry from `config.yaml` (with the usual backup-first
-  write) so you don't accumulate dead entries pointing at a token that no
-  longer authenticates. You get a confirmation screen either way — what
-  was removed and from where, or, if the automatic cleanup fails
-  (permissions, read-only FS), the exact block to delete by hand instead.
-  The identity itself is always gone from the directory regardless of
-  whether the config.yaml cleanup succeeds.
+- **Deleting a Goose-target agent cleans up after itself.** Deleting it
+  also removes that `extensions` entry from `config.yaml` (with the usual
+  backup-first write) so you don't accumulate dead entries pointing at a
+  token that no longer authenticates. You get a confirmation screen either
+  way — what was removed and from where, or, if the automatic cleanup
+  fails (permissions, read-only FS), the exact block to delete by hand
+  instead. The identity itself is always gone from the directory
+  regardless of whether the config.yaml cleanup succeeds.
+- **Deleting an OpenClaw-target agent** removes its `SOUL.md` (if it had
+  one, i.e. it was a manager) but *not* the `openclaw mcp`/`openclaw
+  agents` entries — those live in OpenClaw's own config, which AgenticIAM
+  never writes to directly (see above). The delete confirmation gives you
+  the exact `openclaw mcp unset <name>` command and points you at
+  `openclaw agents list` to remove the persona if you no longer want its
+  workspace/session history.
 
 ## Teams (groups)
 
@@ -242,29 +295,42 @@ identity kind, it's just a role that's been granted `dispatch:<name>`
 permissions. Any agent/role combination can be a manager of any other.
 
 **Checking any manager permission automatically preloads the dispatch
-system prompt**, so you don't paste it in by hand. Creating the agent
-writes a [Goose recipe](https://block.github.io/goose/docs/guides/recipes/recipe-reference/)
-— a small YAML file whose `instructions` field is the full dispatch guide
-(how to call `iamDispatchToAgent` correctly, the `.response` field
-gotcha, the Ollama-only restriction, troubleshooting) — to
-`agenticiam-recipes/<name>.yaml` next to Goose's `config.yaml`. The
-launch command the wizard hands you then uses `goose run --recipe
-<path> --interactive -n <name>` instead of plain `goose session -n
-<name>`, so opening that session starts the manager already knowing how
-to dispatch. The recipe file is deleted automatically when you delete
-the agent. The same content, for reference or manual use elsewhere, is
-at [`docs/manager-system-prompt.md`](docs/manager-system-prompt.md).
+system prompt**, so you don't paste it in by hand — the delivery
+mechanism depends on target:
+
+- **Goose**: creating the agent writes a
+  [Goose recipe](https://block.github.io/goose/docs/guides/recipes/recipe-reference/)
+  — a small YAML file whose `instructions` field is the full dispatch guide
+  (how to call `iamDispatchToAgent` correctly, the `.response` field
+  gotcha, the Ollama-only restriction, troubleshooting) — to
+  `agenticiam-recipes/<name>.yaml` next to Goose's `config.yaml`. The
+  launch command the wizard hands you then uses `goose run --recipe
+  <path> --interactive -n <name>` instead of plain `goose session -n
+  <name>`, so opening that session starts the manager already knowing how
+  to dispatch. The recipe file is deleted automatically when you delete
+  the agent.
+- **OpenClaw**: the same content is written as `SOUL.md` into the agent's
+  workspace (`~/.openclaw/workspace-<name>/SOUL.md`) — OpenClaw's own
+  mechanism for a persona's system prompt.
+
+The same content, for reference or manual use elsewhere, is at
+[`docs/manager-system-prompt.md`](docs/manager-system-prompt.md).
 
 Once granted, the manager's MCP session gets a new tool,
 `iam_dispatch_to_agent(agent, task)`: it runs the task through the named
 worker's own provider/model via `goose run --no-session` (one-shot, not
 an ongoing conversation) and returns the text response inline — so the
 manager's model can call it mid-conversation like a function call and use
-the result. The same capability is available over REST at
-`POST /v1/agents/<name>/dispatch` (body `{"task": "..."}`, any bearer
-token with the right `dispatch:` scope — not admin-gated, so a manager
-agent's own API key works) for non-MCP callers like OpenClaw, and from
-the terminal via `agenticiam agent dispatch <name> "<task>"`.
+the result. **This always shells out to the `goose` binary, even for an
+OpenClaw-target worker** — dispatch is orthogonal to which runtime the
+worker's own interactive session uses, it just needs a provider+model
+pair. So Goose needs to be installed for dispatch to work regardless of
+which target you picked when creating the workers. The same capability is
+available over REST at `POST /v1/agents/<name>/dispatch` (body
+`{"task": "..."}`, any bearer token with the right `dispatch:` scope —
+not admin-gated, so a manager agent's own API key works) for non-MCP
+callers like OpenClaw, and from the terminal via `agenticiam agent
+dispatch <name> "<task>"`.
 
 **Dispatch only works against Ollama-backed workers.** This follows
 directly from AgenticIAM never storing provider API keys (see the wizard
