@@ -229,6 +229,13 @@ verify it actually works; the commands are the reliable part.
 
 ## Multi-agent: managers dispatching to workers
 
+A corrected, copy-pasteable system prompt for a manager agent — how to
+call `iamDispatchToAgent` correctly, the `.response` field gotcha, the
+Ollama-only restriction, troubleshooting — is at
+[`docs/manager-system-prompt.md`](docs/manager-system-prompt.md). Use it
+as the system prompt / recipe instructions for whichever agent you grant
+`dispatch:` permissions to.
+
 Step 3 of the wizard has a "Manager permissions" section: check off which
 existing agents this new one should be able to delegate tasks to (or grant
 `dispatch:*` for "any agent"). No containers, no separate worker
