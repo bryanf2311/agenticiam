@@ -379,7 +379,7 @@ async function renderWizardStep3() {
   body.innerHTML = 'Loading…';
   let existingAgents = [];
   let existingGroups = [];
-  try { existingAgents = await api('/v1/admin/identities?kind=agent'); } catch (err) { /* manager section just won't show */ }
+  try { existingAgents = await api('/v1/admin/identities?kind=agent'); } catch (err) { /* per-agent target list just won't show; wildcard checkbox still works */ }
   try { existingGroups = await api('/v1/admin/groups'); } catch (err) { /* group field still works, just no autocomplete */ }
 
   const groupSection = `
@@ -390,20 +390,24 @@ async function renderWizardStep3() {
       ${existingGroups.map(g => `<option value="${esc(g.name)}">`).join('')}
     </datalist>`;
 
-  const managerSection = existingAgents.length ? `
+  // The wildcard checkbox doesn't need any other agents to exist yet (it
+  // grants dispatch:* — covers workers created later too), so it's always
+  // shown; only the per-agent target list needs existingAgents.
+  const managerSection = `
     <h3 style="margin-top:26px">Manager permissions (optional)</h3>
-    <p class="hint">Let "${esc(wizardState.name)}" delegate tasks to other agents and get their response back — a "manager" dispatching to "workers". Dispatch only works against Ollama-backed agents (AgenticIAM never stores the API keys cloud providers would need).</p>
+    <p class="hint">Let "${esc(wizardState.name)}" delegate tasks to other agents and get their response back — a "manager" dispatching to "workers". Dispatch only works against Ollama-backed agents (AgenticIAM never stores the API keys cloud providers would need). Checking any box here preloads "${esc(wizardState.name)}" with a system prompt explaining how to call the dispatch tool correctly (via a Goose recipe file) — no need to paste it in yourself.</p>
     <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
       <input type="checkbox" id="wiz-dispatch-wildcard" ${wizardState.dispatchWildcard ? 'checked' : ''} style="width:auto">
-      <span>Can dispatch to <strong>any</strong> agent (<span class="mono">dispatch:*</span>)</span>
+      <span>Can dispatch to <strong>any</strong> agent, including ones created later (<span class="mono">dispatch:*</span>)</span>
     </label>
+    ${existingAgents.length ? `
     <div id="wiz-dispatch-list" style="${wizardState.dispatchWildcard ? 'opacity:.4;pointer-events:none' : ''}">
       ${existingAgents.map(a => `
         <label style="display:flex;align-items:center;gap:8px;margin:6px 0">
           <input type="checkbox" class="wiz-dispatch-target" value="${esc(a.name)}" ${wizardState.dispatchTargets.includes(a.name) ? 'checked' : ''} style="width:auto">
           <span>${esc(a.name)} <span class="hint mono">${a.metadata && a.metadata.goose ? esc(a.metadata.goose.provider + '/' + a.metadata.goose.model) : 'not a Goose agent'}</span></span>
         </label>`).join('')}
-    </div>` : '';
+    </div>` : '<p class="hint">No other agents exist yet to dispatch to individually — create this one first, then grant it dispatch rights to specific agents later from the Roles tab, or just use the wildcard above.</p>'}`;
 
   body.innerHTML = `
     <div class="panel">
@@ -431,6 +435,7 @@ async function renderWizardStep3() {
   if (wildcardCb) {
     wildcardCb.addEventListener('change', (e) => {
       const list = document.getElementById('wiz-dispatch-list');
+      if (!list) return;
       list.style.opacity = e.target.checked ? '.4' : '1';
       list.style.pointerEvents = e.target.checked ? 'none' : 'auto';
     });
@@ -519,6 +524,11 @@ function renderWizardStep5() {
     <div class="panel">
       <h3>Agent created</h3>
       <p class="ok">"${esc(r.identity.name)}" is ready.${r.group ? ` Added to group "${esc(r.group)}".` : ''}</p>
+      ${r.is_manager
+        ? (r.manager_recipe_path
+            ? `<p>Manager recipe written to <span class="mono">${esc(r.manager_recipe_path)}</span> — the dispatch system prompt loads automatically with the command below.</p>`
+            : `<div class="err">Couldn't write the manager recipe file: ${esc(r.manager_recipe_error)}. The agent was still created, but you'll need to paste the system prompt in by hand — see docs/manager-system-prompt.md.</div>`)
+        : ''}
       ${r.goose_config_written
         ? `<p>Goose extension registered at <span class="mono">${esc(r.config_path)}</span>.</p>`
         : `<div class="err">Couldn't write Goose config automatically: ${esc(r.goose_config_error)}</div>
@@ -720,7 +730,7 @@ async function renderGroupStartCommands(name) {
       <p class="hint">One set of commands per teammate — open a terminal tab per agent and paste the line for your shell. Agents not created through the Goose wizard have no start command and are skipped.</p>
       ${res.agents.map(a => a.launch_commands ? `
         <div class="panel">
-          <strong>${esc(a.name)}</strong>
+          <strong>${esc(a.name)}</strong>${a.goose && a.goose.is_manager ? ' <span class="badge on">manager — dispatch prompt preloaded</span>' : ''}
           ${shells.map(([key, label]) => `
             <div style="margin:8px 0">
               <div class="hint">${esc(label)}</div>

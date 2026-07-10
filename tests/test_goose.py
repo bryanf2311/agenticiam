@@ -3,6 +3,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+import yaml
 
 from agenticiam import goose
 
@@ -218,6 +219,47 @@ def test_launch_commands_ollama_ignores_api_key():
     commands = goose.launch_commands("bot", "ollama", "llama3.1:8b", api_key="should-not-appear")
     for variant in commands.values():
         assert "should-not-appear" not in variant
+
+
+def test_launch_commands_with_recipe_path_uses_goose_run_interactive():
+    commands = goose.launch_commands("boss", recipe_path="/home/user/.config/goose/agenticiam-recipes/boss.yaml")
+    for shell in ("bash", "powershell"):
+        assert commands[shell] == "goose run --recipe '/home/user/.config/goose/agenticiam-recipes/boss.yaml' --interactive -n boss"
+    assert commands["cmd"] == 'goose run --recipe "/home/user/.config/goose/agenticiam-recipes/boss.yaml" --interactive -n boss'
+
+
+def test_launch_commands_with_recipe_path_and_model_still_sets_env_vars():
+    commands = goose.launch_commands("boss", "ollama", "llama3.1:8b", recipe_path="/x/boss.yaml")
+    assert commands["bash"] == "GOOSE_PROVIDER=ollama GOOSE_MODEL=llama3.1:8b goose run --recipe '/x/boss.yaml' --interactive -n boss"
+
+
+def test_manager_recipe_yaml_has_required_fields_and_prompt_body():
+    rendered = goose.manager_recipe_yaml("boss")
+    parsed = yaml.safe_load(rendered)
+    assert parsed["version"] == "1.0.0"
+    assert parsed["title"] == "boss (manager)"
+    assert "description" in parsed
+    assert parsed["instructions"] == goose.MANAGER_SYSTEM_PROMPT
+    # required by block/goose's recipe schema: at least one of instructions/prompt
+    assert parsed["instructions"]
+    assert "iamDispatchToAgent" in parsed["instructions"]
+    assert "ollama" in parsed["instructions"]
+
+
+def test_write_manager_recipe_writes_file_under_recipes_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(goose, "config_path", lambda: tmp_path / "goose" / "config.yaml")
+    path = goose.write_manager_recipe("Marketing Boss")
+    assert path == tmp_path / "goose" / "agenticiam-recipes" / "marketing-boss.yaml"
+    assert path.exists()
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert parsed["title"] == "Marketing Boss (manager)"
+
+
+def test_write_manager_recipe_overwrites_existing(tmp_path, monkeypatch):
+    monkeypatch.setattr(goose, "config_path", lambda: tmp_path / "goose" / "config.yaml")
+    goose.write_manager_recipe("boss")
+    path = goose.write_manager_recipe("boss")
+    assert path.read_text(encoding="utf-8").count("version:") == 1
 
 
 def test_set_default_provider_model_with_context_limit_ollama():

@@ -162,7 +162,10 @@ from nothing to a running, permissioned AI agent:
    with *that* key (AgenticIAM's own, revocable, low-stakes one) embedded
    in `envs.AGENTICIAM_TOKEN` — never as a shell string, so it never shows
    up in a process listing. You get back a ready-to-paste `goose session
-   -n <name>` command to start chatting, in bash/PowerShell/cmd variants.
+   -n <name>` command to start chatting, in bash/PowerShell/cmd variants
+   — or, for a manager (see below), a `goose run --recipe ...
+   --interactive` command instead, so its dispatch system prompt loads
+   automatically.
 
 Two things worth knowing:
 
@@ -229,20 +232,28 @@ verify it actually works; the commands are the reliable part.
 
 ## Multi-agent: managers dispatching to workers
 
-A corrected, copy-pasteable system prompt for a manager agent — how to
-call `iamDispatchToAgent` correctly, the `.response` field gotcha, the
-Ollama-only restriction, troubleshooting — is at
-[`docs/manager-system-prompt.md`](docs/manager-system-prompt.md). Use it
-as the system prompt / recipe instructions for whichever agent you grant
-`dispatch:` permissions to.
-
 Step 3 of the wizard has a "Manager permissions" section: check off which
-existing agents this new one should be able to delegate tasks to (or grant
-`dispatch:*` for "any agent"). No containers, no separate worker
-processes to manage — a "worker" is just another agent created by the
-same wizard, and "manager" isn't a special identity kind, it's just a
-role that's been granted `dispatch:<name>` permissions. Any agent/role
-combination can be a manager of any other.
+existing agents this new one should be able to delegate tasks to, or
+check "any agent" for `dispatch:*` (available even when creating the
+very first agent — it isn't limited to agents that already exist). No
+containers, no separate worker processes to manage — a "worker" is just
+another agent created by the same wizard, and "manager" isn't a special
+identity kind, it's just a role that's been granted `dispatch:<name>`
+permissions. Any agent/role combination can be a manager of any other.
+
+**Checking any manager permission automatically preloads the dispatch
+system prompt**, so you don't paste it in by hand. Creating the agent
+writes a [Goose recipe](https://block.github.io/goose/docs/guides/recipes/recipe-reference/)
+— a small YAML file whose `instructions` field is the full dispatch guide
+(how to call `iamDispatchToAgent` correctly, the `.response` field
+gotcha, the Ollama-only restriction, troubleshooting) — to
+`agenticiam-recipes/<name>.yaml` next to Goose's `config.yaml`. The
+launch command the wizard hands you then uses `goose run --recipe
+<path> --interactive -n <name>` instead of plain `goose session -n
+<name>`, so opening that session starts the manager already knowing how
+to dispatch. The recipe file is deleted automatically when you delete
+the agent. The same content, for reference or manual use elsewhere, is
+at [`docs/manager-system-prompt.md`](docs/manager-system-prompt.md).
 
 Once granted, the manager's MCP session gets a new tool,
 `iam_dispatch_to_agent(agent, task)`: it runs the task through the named

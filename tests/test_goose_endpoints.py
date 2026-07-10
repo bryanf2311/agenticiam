@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 
 import pytest
@@ -168,6 +169,54 @@ def test_create_goose_agent_end_to_end(client, admin_headers, goose_config_path)
     # the identity really has the requested permissions
     perms = client.get("/v1/admin/identities/research-bot/permissions", headers=admin_headers).get_json()
     assert set(perms) == {"files:read", "shell:exec"}
+
+
+def test_create_goose_agent_with_manager_permission_writes_recipe(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "boss",
+            "permissions": ["dispatch:*"],
+            "provider": "ollama",
+            "model": "llama3.1:8b",
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert body["is_manager"] is True
+    recipe_path = body["manager_recipe_path"]
+    assert recipe_path is not None
+    assert recipe_path.endswith("boss.yaml")
+
+    recipe = yaml.safe_load(open(recipe_path, encoding="utf-8"))
+    assert recipe["title"] == "boss (manager)"
+    assert "iamDispatchToAgent" in recipe["instructions"]
+
+    # goose session has no --recipe flag — must use `goose run --recipe ... --interactive`
+    commands = body["launch_commands"]
+    assert "goose run --recipe" in commands["bash"]
+    assert "--interactive -n boss" in commands["bash"]
+    assert recipe_path in commands["bash"]
+
+    # the identity's metadata records manager status + recipe path so the
+    # groups launch-commands endpoint and delete cleanup can find it later
+    identity = client.get("/v1/admin/identities/boss", headers=admin_headers).get_json()
+    assert identity["metadata"]["goose"]["is_manager"] is True
+    assert identity["metadata"]["goose"]["manager_recipe_path"] == recipe_path
+
+
+def test_create_goose_agent_without_dispatch_permission_is_not_a_manager(client, admin_headers, goose_config_path):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "intern", "permissions": ["files:read"], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    body = resp.get_json()
+    assert body["is_manager"] is False
+    assert body["manager_recipe_path"] is None
+    assert body["launch_commands"]["bash"].endswith("goose session -n intern")
+    assert "--recipe" not in body["launch_commands"]["bash"]
 
 
 def test_create_goose_agent_set_as_default(client, admin_headers, goose_config_path):
@@ -557,6 +606,22 @@ def test_group_launch_commands(client, admin_headers, goose_config_path):
     assert "GOOSE_MODEL=llama3.1:8b" in boss["launch_commands"]["bash"]
 
 
+def test_group_launch_commands_manager_uses_recipe_command(client, admin_headers, goose_config_path):
+    client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "marketing-boss", "permissions": ["dispatch:*"], "provider": "ollama",
+            "model": "llama3.1:8b", "group": "marketing",
+        },
+        headers=admin_headers,
+    )
+    resp = client.get("/v1/admin/groups/marketing/launch-commands", headers=admin_headers)
+    boss = next(a for a in resp.get_json()["agents"] if a["name"] == "marketing-boss")
+    assert boss["goose"]["is_manager"] is True
+    assert "goose run --recipe" in boss["launch_commands"]["bash"]
+    assert boss["goose"]["manager_recipe_path"] in boss["launch_commands"]["bash"]
+
+
 def test_group_launch_commands_skips_non_goose_members(client, admin_headers, directory, goose_config_path):
     directory.create_group("marketing")
     directory.create_identity("agent", "plain-member")
@@ -634,6 +699,32 @@ def test_delete_goose_identity_config_write_failure_gives_manual_instructions(
     # the identity itself is still gone even though the config write failed
     listing = client.get("/v1/admin/identities", headers=admin_headers).get_json()
     assert "marketing-boss" not in [i["name"] for i in listing]
+
+
+def test_delete_manager_identity_removes_recipe_file(client, admin_headers, goose_config_path):
+    create = client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "boss", "permissions": ["dispatch:*"], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    ).get_json()
+    recipe_path = create["manager_recipe_path"]
+    assert os.path.exists(recipe_path)
+
+    resp = client.delete("/v1/admin/identities/boss", headers=admin_headers)
+    body = resp.get_json()
+    assert body["manager_recipe_removed"] is True
+    assert not os.path.exists(recipe_path)
+
+
+def test_delete_non_manager_goose_identity_has_no_recipe_cleanup_fields(client, admin_headers, goose_config_path):
+    client.post(
+        "/v1/admin/goose/agents",
+        json={"name": "intern", "permissions": [], "provider": "ollama", "model": "llama3.1:8b"},
+        headers=admin_headers,
+    )
+    resp = client.delete("/v1/admin/identities/intern", headers=admin_headers)
+    body = resp.get_json()
+    assert "manager_recipe_removed" not in body
 
 
 def test_delete_goose_identity_missing_from_config_noted_not_errored(client, admin_headers, directory, goose_config_path):

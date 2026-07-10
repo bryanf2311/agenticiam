@@ -11,6 +11,7 @@ import base64
 import functools
 import sys
 import time
+from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request
 
@@ -370,6 +371,16 @@ def create_app(db_path=None) -> Flask:
         # rather than leaving a dead entry behind.
         extension_id = goose.slugify(name)
         result = {"identity": name, "extension_id": extension_id, "config_path": str(goose.config_path())}
+
+        recipe_path = goose_meta.get("manager_recipe_path")
+        if recipe_path:
+            try:
+                Path(recipe_path).unlink(missing_ok=True)
+                result["manager_recipe_removed"] = True
+            except OSError as exc:
+                result["manager_recipe_removed"] = False
+                result["manager_recipe_error"] = str(exc)
+
         try:
             cfg = goose.load_config()
             if extension_id in (cfg.get("extensions") or {}):
@@ -480,6 +491,7 @@ def create_app(db_path=None) -> Flask:
                 commands = goose.launch_commands(
                     member["name"], goose_meta["provider"], goose_meta["model"],
                     context_limit=goose_meta.get("context_limit"),
+                    recipe_path=goose_meta.get("manager_recipe_path"),
                 )
             agents.append(
                 {"name": member["name"], "kind": member["kind"], "goose": goose_meta, "launch_commands": commands}
@@ -638,6 +650,19 @@ def create_app(db_path=None) -> Flask:
             cmd, args = _self_command()
         args = args or ["mcp"]
 
+        # A "manager" isn't a hardcoded role — it's just an agent that was
+        # granted dispatch: permissions in the wizard's "Manager
+        # permissions" step. That's also the signal for preloading the
+        # dispatch system prompt below.
+        is_manager = any(p == "dispatch:*" or p.startswith("dispatch:") for p in permissions)
+        recipe_path = None
+        recipe_error = None
+        if is_manager:
+            try:
+                recipe_path = goose.write_manager_recipe(name)
+            except OSError as exc:
+                recipe_error = str(exc)
+
         directory = get_directory()
         actor = _actor()
         role_name = f"{name}-role"
@@ -650,7 +675,11 @@ def create_app(db_path=None) -> Flask:
                 directory.grant_permission(role["name"], perm, actor=actor)
             identity = directory.create_identity(
                 "agent", name, display_name=name,
-                metadata={"goose": {"provider": provider, "model": model, "context_limit": context_limit}},
+                metadata={"goose": {
+                    "provider": provider, "model": model, "context_limit": context_limit,
+                    "is_manager": is_manager,
+                    "manager_recipe_path": str(recipe_path) if recipe_path else None,
+                }},
                 actor=actor,
             )
             directory.assign_role(role["name"], "identity", identity["name"], actor=actor)
@@ -675,6 +704,7 @@ def create_app(db_path=None) -> Flask:
             None if set_as_default else model,
             context_limit=None if set_as_default else context_limit,
             api_key=api_key,
+            recipe_path=recipe_path,
         )
 
         result = {
@@ -686,6 +716,9 @@ def create_app(db_path=None) -> Flask:
             "config_path": str(goose.config_path()),
             "launch_commands": launch_commands,
             "group": group_name,
+            "is_manager": is_manager,
+            "manager_recipe_path": str(recipe_path) if recipe_path else None,
+            "manager_recipe_error": recipe_error,
         }
 
         try:
