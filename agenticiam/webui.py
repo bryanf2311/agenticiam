@@ -241,6 +241,7 @@ function resetWizard() {
   wizardState = {
     status: null, name: '', provider: 'ollama', model: '', apiKey: '',
     contextLimit: '', permissions: [], customPermissions: '',
+    dispatchWildcard: false, dispatchTargets: [],
     setDefault: false, cmd: '', args: '', result: null,
   };
 }
@@ -373,28 +374,58 @@ async function renderWizardStep2() {
   });
 }
 
-function renderWizardStep3() {
+async function renderWizardStep3() {
   const body = document.getElementById('wizard-body');
+  body.innerHTML = 'Loading…';
+  let existingAgents = [];
+  try { existingAgents = await api('/v1/admin/identities?kind=agent'); } catch (err) { /* manager section just won't show */ }
+
+  const managerSection = existingAgents.length ? `
+    <h3 style="margin-top:26px">Manager permissions (optional)</h3>
+    <p class="hint">Let "${esc(wizardState.name)}" delegate tasks to other agents and get their response back — a "manager" dispatching to "workers". Dispatch only works against Ollama-backed agents (AgenticIAM never stores the API keys cloud providers would need).</p>
+    <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+      <input type="checkbox" id="wiz-dispatch-wildcard" ${wizardState.dispatchWildcard ? 'checked' : ''} style="width:auto">
+      <span>Can dispatch to <strong>any</strong> agent (<span class="mono">dispatch:*</span>)</span>
+    </label>
+    <div id="wiz-dispatch-list" style="${wizardState.dispatchWildcard ? 'opacity:.4;pointer-events:none' : ''}">
+      ${existingAgents.map(a => `
+        <label style="display:flex;align-items:center;gap:8px;margin:6px 0">
+          <input type="checkbox" class="wiz-dispatch-target" value="${esc(a.name)}" ${wizardState.dispatchTargets.includes(a.name) ? 'checked' : ''} style="width:auto">
+          <span>${esc(a.name)} <span class="hint mono">${a.metadata && a.metadata.goose ? esc(a.metadata.goose.provider + '/' + a.metadata.goose.model) : 'not a Goose agent'}</span></span>
+        </label>`).join('')}
+    </div>` : '';
+
   body.innerHTML = `
     <div class="panel">
       <h3>Step 3 of 4 — Permissions</h3>
       <p class="hint">What should "${esc(wizardState.name)}" be allowed to do? This becomes a role scoped just to this agent.</p>
       ${WIZARD_COMMON_PERMISSIONS.map(([perm, label]) => `
         <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
-          <input type="checkbox" value="${perm}" ${wizardState.permissions.includes(perm) ? 'checked' : ''} style="width:auto">
+          <input type="checkbox" class="wiz-perm-checkbox" value="${perm}" ${wizardState.permissions.includes(perm) ? 'checked' : ''} style="width:auto">
           <span>${esc(label)} <span class="mono hint">(${perm})</span></span>
         </label>`).join('')}
       <label>Additional permissions (space-separated, e.g. files:* custom:scope)</label>
       <input id="wiz-custom-perms" value="${esc(wizardState.customPermissions)}">
+      ${managerSection}
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
         <button id="wiz-next">Next</button>
       </div>
     </div>`;
   document.getElementById('wiz-back').addEventListener('click', () => { wizardStep = 2; renderWizard(); });
+  const wildcardCb = document.getElementById('wiz-dispatch-wildcard');
+  if (wildcardCb) {
+    wildcardCb.addEventListener('change', (e) => {
+      const list = document.getElementById('wiz-dispatch-list');
+      list.style.opacity = e.target.checked ? '.4' : '1';
+      list.style.pointerEvents = e.target.checked ? 'none' : 'auto';
+    });
+  }
   document.getElementById('wiz-next').addEventListener('click', () => {
-    wizardState.permissions = Array.from(body.querySelectorAll('input[type=checkbox]:checked')).map(i => i.value);
+    wizardState.permissions = Array.from(body.querySelectorAll('.wiz-perm-checkbox:checked')).map(i => i.value);
     wizardState.customPermissions = document.getElementById('wiz-custom-perms').value;
+    wizardState.dispatchWildcard = wildcardCb ? wildcardCb.checked : false;
+    wizardState.dispatchTargets = Array.from(body.querySelectorAll('.wiz-dispatch-target:checked')).map(i => i.value);
     wizardStep = 4; renderWizard();
   });
 }
@@ -404,7 +435,8 @@ function renderWizardStep4() {
   const s = wizardState.status || {};
   if (!wizardState.cmd) wizardState.cmd = s.suggested_cmd || 'agenticiam';
   if (!wizardState.args) wizardState.args = (s.suggested_args || ['mcp']).join(' ');
-  const allPerms = wizardState.permissions.concat((wizardState.customPermissions || '').split(/\\s+/).filter(Boolean));
+  const dispatchPerms = wizardState.dispatchWildcard ? ['dispatch:*'] : wizardState.dispatchTargets.map(n => `dispatch:${n}`);
+  const allPerms = wizardState.permissions.concat((wizardState.customPermissions || '').split(/\\s+/).filter(Boolean)).concat(dispatchPerms);
   const providerLabel = (WIZARD_PROVIDERS.find(([id]) => id === wizardState.provider) || [wizardState.provider, wizardState.provider])[1];
   body.innerHTML = `
     <div class="panel">

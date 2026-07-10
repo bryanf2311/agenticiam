@@ -15,7 +15,7 @@ import os
 import sys
 import traceback
 
-from . import __version__, audit, db, directory as directory_module, paths, policy, tokens
+from . import __version__, audit, db, directory as directory_module, goose, paths, policy, tokens
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -122,6 +122,30 @@ def h_audit_log(directory, principal, args):
     return audit.tail(directory.conn, limit=int(args.get("limit", 50)))
 
 
+def h_dispatch_to_agent(directory, principal, args):
+    """"Manager delegates a task to a worker" — requires dispatch:<agent>
+    (or dispatch:*), only works against Ollama-backed workers since
+    AgenticIAM never stores provider API keys to reconstruct a dispatch
+    call for anything that needs one (see goose.run_agent_task)."""
+    agent_name = args["agent"]
+    _require_permission(principal, f"dispatch:{agent_name}")
+    target = directory.get_identity(agent_name)
+    goose_meta = (target.get("metadata") or {}).get("goose")
+    if not goose_meta:
+        raise ValueError(f"{agent_name!r} was not created as a Goose agent (no provider/model metadata)")
+    if goose_meta.get("provider") != "ollama":
+        raise ValueError(
+            "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
+            "API keys for cloud providers, so there's nothing to dispatch a cloud-backed agent with"
+        )
+    response_text = goose.run_agent_task(goose_meta["provider"], goose_meta["model"], args["task"])
+    audit.log(
+        directory.conn, f"dispatch.{agent_name}", "success",
+        actor_id=principal.get("sub"), actor_name=principal.get("name"),
+    )
+    return {"agent": agent_name, "response": response_text}
+
+
 TOOL_HANDLERS = {
     "iam_whoami": h_whoami,
     "iam_check_permission": h_check_permission,
@@ -137,6 +161,7 @@ TOOL_HANDLERS = {
     "iam_effective_permissions": h_effective_permissions,
     "iam_issue_api_key": h_issue_api_key,
     "iam_audit_log": h_audit_log,
+    "iam_dispatch_to_agent": h_dispatch_to_agent,
 }
 
 TOOL_SCHEMAS = [
@@ -271,6 +296,20 @@ TOOL_SCHEMAS = [
             "properties": {"limit": {"type": "integer"}},
         },
     },
+    {
+        "name": "iam_dispatch_to_agent",
+        "description": (
+            "Delegate a task to another agent identity and get its text response back, like a manager "
+            "dispatching to a worker. Requires the caller's token to grant dispatch:<agent> or dispatch:*. "
+            "Only works against Ollama-backed agents created by the New Agent wizard — AgenticIAM never "
+            "stores provider API keys, so cloud-backed agents (Anthropic/Google) can't be dispatched to."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"agent": {"type": "string"}, "task": {"type": "string"}},
+            "required": ["agent", "task"],
+        },
+    },
 ]
 
 
@@ -329,7 +368,10 @@ def _handle_message(directory, principal, message):
             _send(
                 {"jsonrpc": "2.0", "id": msg_id, "result": {"content": [{"type": "text", "text": str(exc)}], "isError": True}}
             )
-        except (directory_module.NotFoundError, directory_module.ConflictError, ValueError, KeyError) as exc:
+        except (
+            directory_module.NotFoundError, directory_module.ConflictError,
+            goose.DispatchError, ValueError, KeyError,
+        ) as exc:
             _send(
                 {"jsonrpc": "2.0", "id": msg_id, "result": {"content": [{"type": "text", "text": str(exc)}], "isError": True}}
             )

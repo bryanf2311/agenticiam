@@ -230,3 +230,52 @@ def test_set_default_provider_model_with_context_limit_non_ollama():
     result = goose.set_default_provider_model({}, "anthropic", "claude-sonnet-5", context_limit=16000)
     assert result["GOOSE_CONTEXT_LIMIT"] == 16000
     assert "GOOSE_INPUT_LIMIT" not in result
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_run_agent_task_builds_expected_command(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        return _FakeCompletedProcess(returncode=0, stdout="  the answer  \n")
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    result = goose.run_agent_task("ollama", "llama3.1:8b", "summarize this", timeout=30, goose_binary="goose")
+    assert result == "the answer"
+    assert captured["cmd"] == ["goose", "run", "--no-session", "--provider", "ollama", "--model", "llama3.1:8b", "-t", "summarize this"]
+    assert captured["timeout"] == 30
+
+
+def test_run_agent_task_nonzero_exit_raises(monkeypatch):
+    monkeypatch.setattr(
+        goose.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout="", stderr="model not found"),
+    )
+    with pytest.raises(goose.DispatchError, match="model not found"):
+        goose.run_agent_task("ollama", "nope", "task")
+
+
+def test_run_agent_task_missing_binary_raises(monkeypatch):
+    def fake_run(*a, **k):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    with pytest.raises(goose.DispatchError, match="not found"):
+        goose.run_agent_task("ollama", "llama3.1:8b", "task", goose_binary="goose")
+
+
+def test_run_agent_task_timeout_raises(monkeypatch):
+    def fake_run(*a, **k):
+        raise goose.subprocess.TimeoutExpired(cmd="goose", timeout=5)
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    with pytest.raises(goose.DispatchError, match="timed out"):
+        goose.run_agent_task("ollama", "llama3.1:8b", "task", timeout=5)

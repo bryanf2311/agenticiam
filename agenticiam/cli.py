@@ -162,6 +162,33 @@ def agent_rotate_secret(name):
     click.echo(f"New client_secret (shown once): {secret}")
 
 
+@agent.command("dispatch")
+@click.argument("name")
+@click.argument("task")
+def agent_dispatch(name, task):
+    """Run a one-shot task through a Goose-linked agent (must be Ollama-backed; see the New Agent wizard docs)."""
+    d = _directory()
+    try:
+        target = d.get_identity(name)
+    except NotFoundError as exc:
+        raise click.ClickException(str(exc))
+    goose_meta = (target.get("metadata") or {}).get("goose")
+    if not goose_meta:
+        raise click.ClickException(f"{name!r} was not created as a Goose agent (no provider/model metadata)")
+    if goose_meta.get("provider") != "ollama":
+        raise click.ClickException(
+            "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
+            "API keys for cloud providers"
+        )
+    from . import goose as goose_module
+
+    try:
+        result = goose_module.run_agent_task(goose_meta["provider"], goose_meta["model"], task)
+    except goose_module.DispatchError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(result)
+
+
 # ---------------------------------------------------------------- generic identity ops
 @main.group()
 def identity():

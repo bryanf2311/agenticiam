@@ -197,6 +197,42 @@ Two things worth knowing:
   extension at whichever binary is actually running the server, and it
   works whether you have one executable on disk or both.
 
+## Multi-agent: managers dispatching to workers
+
+Step 3 of the wizard has a "Manager permissions" section: check off which
+existing agents this new one should be able to delegate tasks to (or grant
+`dispatch:*` for "any agent"). No containers, no separate worker
+processes to manage — a "worker" is just another agent created by the
+same wizard, and "manager" isn't a special identity kind, it's just a
+role that's been granted `dispatch:<name>` permissions. Any agent/role
+combination can be a manager of any other.
+
+Once granted, the manager's MCP session gets a new tool,
+`iam_dispatch_to_agent(agent, task)`: it runs the task through the named
+worker's own provider/model via `goose run --no-session` (one-shot, not
+an ongoing conversation) and returns the text response inline — so the
+manager's model can call it mid-conversation like a function call and use
+the result. The same capability is available over REST at
+`POST /v1/agents/<name>/dispatch` (body `{"task": "..."}`, any bearer
+token with the right `dispatch:` scope — not admin-gated, so a manager
+agent's own API key works) for non-MCP callers like OpenClaw, and from
+the terminal via `agenticiam agent dispatch <name> "<task>"`.
+
+**Dispatch only works against Ollama-backed workers.** This follows
+directly from AgenticIAM never storing provider API keys (see the wizard
+section above) — there's nowhere to pull an Anthropic/Google key back out
+of when a dispatch call comes in later, so cloud-backed agents cleanly
+error instead of silently failing or needing you to paste a key into
+every dispatch call. In practice this maps naturally onto the shape most
+people want anyway: cheap/fast local Ollama models as workers, a bigger
+cloud model (typically Claude, via Anthropic — but nothing enforces
+that) as the manager calling `dispatch` from its own session.
+
+`goose run` (unlike `session`) genuinely accepts `--provider`/`--model`
+flags — confirmed against the CLI docs and consistent with everything
+else in this README that touches Goose flags, all of which is verified
+against a real install, not assumed.
+
 ## Integrating with Claude Desktop / Claude Code / Claude Cowork (MCP)
 
 Issue a token for whichever identity the session should act as, then point
@@ -220,8 +256,10 @@ an MCP client config at the binary:
 
 The agent now has tools like `iam_whoami`, `iam_check_permission`,
 `iam_create_identity`, `iam_create_group`, `iam_assign_role`,
-`iam_issue_api_key`, and `iam_audit_log` — enough to fully administer the
-directory from inside a Claude session if the token's identity has
+`iam_issue_api_key`, `iam_dispatch_to_agent` (see "Multi-agent" above),
+and `iam_audit_log` — enough to fully administer the directory and
+delegate to other agents from inside a Claude session if the token's
+identity has
 `iam:admin`, or just to introspect its own permissions if not.
 
 ## Integrating with OpenClaw
@@ -261,6 +299,7 @@ agenticiam whoami --token TOKEN          resolve a token to an identity + scopes
 
 agenticiam user add|list                 human identities
 agenticiam agent add|list|rotate-secret  AI agent / service identities
+agenticiam agent dispatch NAME TASK      run a task through a Goose-linked (Ollama-backed) agent
 agenticiam identity show|enable|disable|rm|permissions NAME
 
 agenticiam group add|list|add-member|remove-member|members

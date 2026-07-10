@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -45,6 +46,10 @@ class ProviderUnavailable(Exception):
 
 
 class OllamaUnavailable(ProviderUnavailable):
+    pass
+
+
+class DispatchError(Exception):
     pass
 
 
@@ -260,3 +265,35 @@ def extension_snippet_yaml(
         default_flow_style=False,
         sort_keys=False,
     )
+
+
+def run_agent_task(provider: str, model: str, task: str, timeout: float = 120.0, goose_binary: str = None) -> str:
+    """Runs a single non-interactive task through Goose as a given
+    provider/model and returns its text response — this is the "manager
+    dispatches to a worker" mechanism.
+
+    Deliberately `goose run`, not `goose session`: `run` is the one that
+    actually accepts --provider/--model overrides (confirmed against a
+    real install after `session` rejected those flags outright — see
+    launch_commands's docstring for the same lesson). `--no-session`
+    keeps it a one-shot call with no persisted session state to manage.
+
+    This only ever runs against providers that need no API key (in
+    practice, Ollama) — AgenticIAM never stores provider API keys (see
+    launch_commands), so there is nowhere to pull an Anthropic/Google key
+    back out of for a dispatch call the manager didn't just type in.
+    Callers are expected to enforce that restriction before calling this;
+    it isn't re-checked here since this function has no notion of "worker
+    identity", just provider/model/task.
+    """
+    binary = goose_binary or find_goose_binary() or "goose"
+    cmd = [binary, "run", "--no-session", "--provider", provider, "--model", model, "-t", task]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise DispatchError(f"goose executable not found ({binary})") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchError(f"dispatched task timed out after {timeout}s") from exc
+    if result.returncode != 0:
+        raise DispatchError(result.stderr.strip() or f"goose run exited with status {result.returncode}")
+    return result.stdout.strip()

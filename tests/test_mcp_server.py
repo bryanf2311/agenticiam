@@ -111,6 +111,56 @@ def test_serve_stdio_handshake_never_touches_disk(monkeypatch):
     assert sent[2]["result"] == {}
 
 
+def test_dispatch_requires_permission(directory):
+    directory.create_identity(
+        "agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}}
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, [])  # no dispatch:* grant
+    with pytest.raises(PermissionError):
+        mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "hi"})
+
+
+def test_dispatch_non_goose_agent_raises_value_error(directory):
+    directory.create_identity("agent", "plain-agent")
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:plain-agent"])
+    with pytest.raises(ValueError, match="not created as a Goose agent"):
+        mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "plain-agent", "task": "hi"})
+
+
+def test_dispatch_non_ollama_provider_raises_value_error(directory):
+    directory.create_identity(
+        "agent", "cloud-worker", metadata={"goose": {"provider": "anthropic", "model": "claude-sonnet-5"}}
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:cloud-worker"])
+    with pytest.raises(ValueError, match="only supports Ollama"):
+        mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "cloud-worker", "task": "hi"})
+
+
+def test_dispatch_success(directory, monkeypatch):
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", lambda provider, model, task, **kw: f"did: {task}")
+    directory.create_identity(
+        "agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}}
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:worker1"])
+    result = mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "summarize"})
+    assert result == {"agent": "worker1", "response": "did: summarize"}
+
+
+def test_dispatch_wildcard_permission_works(directory, monkeypatch):
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", lambda provider, model, task, **kw: "ok")
+    directory.create_identity(
+        "agent", "worker1", metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b"}}
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:*"])
+    result = mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "worker1", "task": "hi"})
+    assert result["response"] == "ok"
+
+
 def test_serve_stdio_initializes_directory_lazily_on_first_tools_call(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTICIAM_HOME", str(tmp_path))
     sent = []

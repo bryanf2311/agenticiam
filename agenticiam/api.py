@@ -243,6 +243,72 @@ def create_app(db_path=None) -> Flask:
         )
         return jsonify({"allow": allowed, "subject": info.get("name"), "action": action})
 
+    @app.post("/v1/agents/<name>/dispatch")
+    def dispatch_to_agent(name):
+        # Authorized by the caller's own dispatch:<name> (or dispatch:*)
+        # scope rather than iam:admin — any agent granted that permission
+        # (a "manager") can dispatch, not just directory admins.
+        principal = _current_principal()
+        if not principal:
+            return jsonify({"error": "unauthorized"}), 401
+        action = f"dispatch:{name}"
+        directory = get_directory()
+        if not policy.is_allowed(principal.get("scopes", []), action):
+            audit.log(
+                directory.conn, f"authz.{action}", "denied",
+                actor_id=principal.get("sub"), actor_name=principal.get("name"),
+            )
+            return jsonify({"error": "forbidden"}), 403
+
+        try:
+            target = directory.get_identity(name)
+        except directory_module.NotFoundError as exc:
+            return jsonify({"error": str(exc)}), 404
+        goose_meta = (target.get("metadata") or {}).get("goose")
+        if not goose_meta:
+            return (
+                jsonify(
+                    {
+                        "error": "invalid_request",
+                        "error_description": f"{name!r} was not created as a Goose agent (no provider/model metadata)",
+                    }
+                ),
+                400,
+            )
+        if goose_meta.get("provider") != "ollama":
+            return (
+                jsonify(
+                    {
+                        "error": "unsupported",
+                        "error_description": (
+                            "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
+                            "API keys for cloud providers, so there's nothing to dispatch a cloud-backed agent with"
+                        ),
+                    }
+                ),
+                400,
+            )
+
+        data = request.get_json(force=True)
+        task = (data.get("task") or "").strip()
+        if not task:
+            return jsonify({"error": "invalid_request", "error_description": "task is required"}), 400
+
+        try:
+            response_text = goose.run_agent_task(goose_meta["provider"], goose_meta["model"], task)
+        except goose.DispatchError as exc:
+            audit.log(
+                directory.conn, f"dispatch.{name}", "failure",
+                actor_id=principal.get("sub"), actor_name=principal.get("name"), detail={"error": str(exc)},
+            )
+            return jsonify({"error": "dispatch_failed", "error_description": str(exc)}), 502
+
+        audit.log(
+            directory.conn, f"dispatch.{name}", "success",
+            actor_id=principal.get("sub"), actor_name=principal.get("name"),
+        )
+        return jsonify({"agent": name, "response": response_text})
+
     # ------------------------------------------------------------ admin: identities
     @app.get("/v1/admin/identities")
     @require_permission(ADMIN_PERMISSION)
@@ -512,7 +578,11 @@ def create_app(db_path=None) -> Flask:
                 role = directory.get_role(role_name)
             for perm in permissions:
                 directory.grant_permission(role["name"], perm, actor=actor)
-            identity = directory.create_identity("agent", name, display_name=name, actor=actor)
+            identity = directory.create_identity(
+                "agent", name, display_name=name,
+                metadata={"goose": {"provider": provider, "model": model, "context_limit": context_limit}},
+                actor=actor,
+            )
             directory.assign_role(role["name"], "identity", identity["name"], actor=actor)
             key = directory.create_api_key(identity["name"], scopes=None, actor=actor)
         except directory_module.ConflictError as exc:

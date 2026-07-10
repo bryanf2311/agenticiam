@@ -333,3 +333,124 @@ def test_self_command_frozen_gui_binary(monkeypatch):
     cmd, args = api_module._self_command()
     assert cmd == "/opt/agenticiam/agenticiam-gui"
     assert args == ["mcp"]
+
+
+# ---------------------------------------------------------------- dispatch (manager -> worker)
+
+@pytest.fixture
+def ollama_worker(directory):
+    return directory.create_identity(
+        "agent", "worker1", display_name="worker1",
+        metadata={"goose": {"provider": "ollama", "model": "llama3.1:8b", "context_limit": None}},
+    )
+
+
+@pytest.fixture
+def manager_token(directory, ollama_worker):
+    directory.create_role("manager-role")
+    directory.grant_permission("manager-role", f"dispatch:{ollama_worker['name']}")
+    manager = directory.create_identity("agent", "manager1")
+    directory.assign_role("manager-role", "identity", "manager1")
+    return tokens.issue_access_token(manager, [f"dispatch:{ollama_worker['name']}"])
+
+
+def test_dispatch_requires_auth(client, ollama_worker):
+    resp = client.post(f"/v1/agents/{ollama_worker['name']}/dispatch", json={"task": "hi"})
+    assert resp.status_code == 401
+
+
+def test_dispatch_requires_dispatch_permission(client, directory, ollama_worker):
+    identity = directory.create_identity("agent", "no-perms")
+    token = tokens.issue_access_token(identity, [])
+    resp = client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "hi"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_dispatch_unknown_agent(client, directory, ollama_worker):
+    # dispatch:* so the permission check passes and we actually reach the
+    # existence check (a scoped-but-wrong-name token correctly 403s first —
+    # no information-disclosure oracle for callers without the right grant)
+    directory.create_role("wildcard-role")
+    directory.grant_permission("wildcard-role", "dispatch:*")
+    manager = directory.create_identity("agent", "wildcard-manager")
+    directory.assign_role("wildcard-role", "identity", "wildcard-manager")
+    token = tokens.issue_access_token(manager, ["dispatch:*"])
+    resp = client.post(
+        "/v1/agents/does-not-exist/dispatch", json={"task": "hi"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 404
+
+
+def test_dispatch_non_goose_agent_rejected(client, directory, manager_token):
+    directory.create_identity("agent", "plain-agent")
+    token = tokens.issue_access_token(directory.get_identity("manager1"), ["dispatch:plain-agent"])
+    resp = client.post(
+        "/v1/agents/plain-agent/dispatch", json={"task": "hi"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 400
+    assert "not created as a Goose agent" in resp.get_json()["error_description"]
+
+
+def test_dispatch_non_ollama_provider_rejected(client, directory, manager_token):
+    directory.create_identity(
+        "agent", "cloud-worker", metadata={"goose": {"provider": "anthropic", "model": "claude-sonnet-5"}}
+    )
+    token = tokens.issue_access_token(directory.get_identity("manager1"), ["dispatch:cloud-worker"])
+    resp = client.post(
+        "/v1/agents/cloud-worker/dispatch", json={"task": "hi"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 400
+    assert "only supports Ollama" in resp.get_json()["error_description"]
+
+
+def test_dispatch_missing_task(client, manager_token, ollama_worker):
+    resp = client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch", json={}, headers={"Authorization": f"Bearer {manager_token}"}
+    )
+    assert resp.status_code == 400
+
+
+def test_dispatch_success(client, manager_token, ollama_worker, monkeypatch):
+    monkeypatch.setattr(goose, "run_agent_task", lambda provider, model, task, **kw: f"[{provider}/{model}] {task}")
+    resp = client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "summarize the README"},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"agent": "worker1", "response": "[ollama/llama3.1:8b] summarize the README"}
+
+
+def test_dispatch_failure_returns_502(client, manager_token, ollama_worker, monkeypatch):
+    def fail(provider, model, task, **kw):
+        raise goose.DispatchError("goose executable not found")
+
+    monkeypatch.setattr(goose, "run_agent_task", fail)
+    resp = client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "hi"},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert resp.status_code == 502
+    assert "goose executable not found" in resp.get_json()["error_description"]
+
+
+def test_dispatch_wildcard_permission(client, directory, ollama_worker, monkeypatch):
+    monkeypatch.setattr(goose, "run_agent_task", lambda provider, model, task, **kw: "ok")
+    directory.create_role("super-manager-role")
+    directory.grant_permission("super-manager-role", "dispatch:*")
+    manager = directory.create_identity("agent", "super-manager")
+    directory.assign_role("super-manager-role", "identity", "super-manager")
+    token = tokens.issue_access_token(manager, ["dispatch:*"])
+    resp = client.post(
+        f"/v1/agents/{ollama_worker['name']}/dispatch",
+        json={"task": "hi"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["response"] == "ok"
