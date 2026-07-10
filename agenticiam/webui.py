@@ -354,7 +354,7 @@ function renderWizardStep4() {
   const s = wizardState.status || {};
   if (!wizardState.cmd) wizardState.cmd = s.suggested_cmd || 'agenticiam';
   if (!wizardState.args) wizardState.args = (s.suggested_args || ['mcp']).join(' ');
-  const allPerms = wizardState.permissions.concat((wizardState.customPermissions || '').split(/\s+/).filter(Boolean));
+  const allPerms = wizardState.permissions.concat((wizardState.customPermissions || '').split(/\\s+/).filter(Boolean));
   body.innerHTML = `
     <div class="panel">
       <h3>Step 4 of 4 — Review & create</h3>
@@ -393,7 +393,7 @@ function renderWizardStep4() {
         permissions: allPerms,
         set_as_default: wizardState.setDefault,
         cmd: wizardState.cmd,
-        args: wizardState.args.split(/\s+/).filter(Boolean),
+        args: wizardState.args.split(/\\s+/).filter(Boolean),
       } });
       wizardState.result = res;
       wizardStep = 5;
@@ -405,6 +405,7 @@ function renderWizardStep4() {
 function renderWizardStep5() {
   const body = document.getElementById('wizard-body');
   const r = wizardState.result;
+  const shells = [['bash', 'macOS / Linux (bash, zsh)'], ['powershell', 'Windows PowerShell'], ['cmd', 'Windows cmd.exe']];
   body.innerHTML = `
     <div class="panel">
       <h3>Agent created</h3>
@@ -414,14 +415,21 @@ function renderWizardStep5() {
         : `<div class="err">Couldn't write Goose config automatically: ${esc(r.goose_config_error)}</div>
            <p>Add this to <span class="mono">${esc(r.config_path)}</span> by hand:</p>
            <textarea rows="9" readonly>${esc(r.manual_extension_snippet)}</textarea>`}
-      <label>Run this to start chatting with your agent:</label>
-      <div class="secret-box">${esc(r.launch_command)}</div>
+      <label>Run this to start chatting with your agent — pick the line for your terminal:</label>
+      ${shells.map(([key, label]) => `
+        <div style="margin:10px 0">
+          <div class="hint">${esc(label)}</div>
+          <div class="row" style="align-items:stretch">
+            <div class="secret-box" style="flex:1;margin:4px 0">${esc(r.launch_commands[key])}</div>
+            <button class="secondary" data-copy="${key}">Copy</button>
+          </div>
+        </div>`).join('')}
       <div class="submit-row row">
-        <button class="secondary" id="wiz-copy">Copy command</button>
         <button id="wiz-another">Create another agent</button>
       </div>
     </div>`;
-  document.getElementById('wiz-copy').addEventListener('click', () => navigator.clipboard.writeText(r.launch_command));
+  body.querySelectorAll('button[data-copy]').forEach(btn => btn.addEventListener('click', () =>
+    navigator.clipboard.writeText(r.launch_commands[btn.dataset.copy])));
   document.getElementById('wiz-another').addEventListener('click', () => { resetWizard(); renderWizard(); });
 }
 

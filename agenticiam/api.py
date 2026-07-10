@@ -10,7 +10,6 @@ scoped to a single self-hosted directory.
 import base64
 import functools
 import sys
-from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request
 
@@ -24,18 +23,12 @@ def _self_command():
     """Best-guess command+args to relaunch this same binary as an MCP
     server, for pre-filling the Goose extension wizard.
 
-    When running frozen as the GUI exe, sys.executable points at
-    agenticiam-gui, which ignores argv and always launches the web UI —
-    it has no "mcp" subcommand at all. Point at the sibling CLI binary
-    instead when that's the situation.
+    Both shipped executables understand `mcp` as an argument — the GUI
+    exe dispatches to the same CLI when given any argv (see gui.main) and
+    only auto-launches the browser when run with none — so whichever one
+    is actually running this server is the right thing to suggest.
     """
     if getattr(sys, "frozen", False):
-        exe = Path(sys.executable)
-        if "-gui" in exe.stem:
-            sibling = exe.with_name(exe.name.replace("-gui", ""))
-            if sibling.exists():
-                return str(sibling), ["mcp"]
-            return "agenticiam", ["mcp"]
         return sys.executable, ["mcp"]
     return sys.executable, ["-m", "agenticiam", "mcp"]
 
@@ -514,9 +507,9 @@ def create_app(db_path=None) -> Flask:
             return jsonify({"error": str(exc)}), 400
 
         extension_id = goose.slugify(name)
-        launch_command = f"goose session -n {name}"
-        if model:
-            launch_command += f" --provider {provider} --model {model}"
+        # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL into config.yaml,
+        # a per-invocation env override would just be redundant — show the plain command
+        launch_commands = goose.launch_commands(name, provider, None if set_as_default else model)
 
         result = {
             "identity": identity,
@@ -525,7 +518,7 @@ def create_app(db_path=None) -> Flask:
             "api_key_id": key["id"],
             "extension_id": extension_id,
             "config_path": str(goose.config_path()),
-            "launch_command": launch_command,
+            "launch_commands": launch_commands,
         }
 
         try:

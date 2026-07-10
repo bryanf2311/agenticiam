@@ -117,6 +117,30 @@ def set_default_provider_model(config: dict, provider: str, model: str) -> dict:
     return config
 
 
+def launch_commands(name: str, provider: str = None, model: str = None) -> dict:
+    """Shell-specific commands to start an interactive Goose session for
+    this agent.
+
+    `goose session` has no --provider/--model flags (only `goose run`
+    does — confirmed against a real Goose install after an earlier
+    version of this wizard generated `session --provider ... --model
+    ...` and it rejected them outright). GOOSE_PROVIDER/GOOSE_MODEL are
+    documented as readable from the environment as well as config.yaml,
+    so a per-invocation override goes through env vars instead — whose
+    syntax differs enough across shells that we hand back all three
+    rather than guess which one the user is in.
+    """
+    base = f"goose session -n {name}"
+    if not model:
+        return {"bash": base, "powershell": base, "cmd": base}
+    provider = provider or "ollama"
+    return {
+        "bash": f"GOOSE_PROVIDER={provider} GOOSE_MODEL={model} {base}",
+        "powershell": f'$env:GOOSE_PROVIDER="{provider}"; $env:GOOSE_MODEL="{model}"; {base}',
+        "cmd": f'set "GOOSE_PROVIDER={provider}" && set "GOOSE_MODEL={model}" && {base}',
+    }
+
+
 def extension_snippet_yaml(
     extension_id: str, display_name: str, cmd: str, args: list, token: str, timeout_seconds: int = 300
 ) -> str:

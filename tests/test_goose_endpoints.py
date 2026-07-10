@@ -113,7 +113,14 @@ def test_create_goose_agent_end_to_end(client, admin_headers, goose_config_path)
     assert body["identity"]["name"] == "research-bot"
     assert body["identity"]["kind"] == "agent"
     assert body["goose_config_written"] is True
-    assert body["launch_command"] == "goose session -n research-bot --provider ollama --model llama3.1:8b"
+    commands = body["launch_commands"]
+    assert commands["bash"] == "GOOSE_PROVIDER=ollama GOOSE_MODEL=llama3.1:8b goose session -n research-bot"
+    assert "$env:GOOSE_MODEL=\"llama3.1:8b\"" in commands["powershell"]
+    assert "set \"GOOSE_MODEL=llama3.1:8b\"" in commands["cmd"]
+    # goose session has no --provider/--model flags — must never appear in any variant
+    for variant in commands.values():
+        assert "--provider" not in variant
+        assert "--model" not in variant
 
     written = goose.load_config()
     entry = written["extensions"]["research-bot"]
@@ -139,6 +146,9 @@ def test_create_goose_agent_set_as_default(client, admin_headers, goose_config_p
     written = goose.load_config()
     assert written["GOOSE_PROVIDER"] == "ollama"
     assert written["GOOSE_MODEL"] == "llama3.1:8b"
+    # the model is already the global default now, so no env-var override needed
+    commands = resp.get_json()["launch_commands"]
+    assert commands["bash"] == "goose session -n bot2"
 
 
 def test_create_goose_agent_preserves_existing_config(client, admin_headers, goose_config_path):
@@ -209,23 +219,12 @@ def test_self_command_frozen_cli_binary(monkeypatch):
     assert args == ["mcp"]
 
 
-def test_self_command_frozen_gui_binary_with_sibling(monkeypatch, tmp_path):
-    cli_bin = tmp_path / "agenticiam"
-    cli_bin.write_text("")
-    gui_bin = tmp_path / "agenticiam-gui"
-    gui_bin.write_text("")
+def test_self_command_frozen_gui_binary(monkeypatch):
+    # the GUI exe understands "mcp" as an argument too (see gui.main), so
+    # whichever binary is actually running the server is the right answer —
+    # no more guessing whether a separate CLI binary exists alongside it
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(gui_bin))
+    monkeypatch.setattr(sys, "executable", "/opt/agenticiam/agenticiam-gui")
     cmd, args = api_module._self_command()
-    assert cmd == str(cli_bin)
-    assert args == ["mcp"]
-
-
-def test_self_command_frozen_gui_binary_without_sibling(monkeypatch, tmp_path):
-    gui_bin = tmp_path / "agenticiam-gui"
-    gui_bin.write_text("")
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(gui_bin))
-    cmd, args = api_module._self_command()
-    assert cmd == "agenticiam"
+    assert cmd == "/opt/agenticiam/agenticiam-gui"
     assert args == ["mcp"]

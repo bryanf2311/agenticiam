@@ -150,8 +150,8 @@ from nothing to a running, permissioned local AI agent:
    this doc), mints an API key, and registers an `extensions` entry in
    Goose's `config.yaml` with that key embedded in `envs.AGENTICIAM_TOKEN`
    — never as a shell string, so it never shows up in a process listing.
-   You get back a ready-to-paste `goose session -n <name> --provider
-   ollama --model <model>` command to start chatting.
+   You get back a ready-to-paste `goose session -n <name>` command to
+   start chatting, in bash/PowerShell/cmd variants.
 
 Two things worth knowing:
 
@@ -160,19 +160,28 @@ Two things worth knowing:
   you're driving the web console from a browser on a *different* machine
   than the one running `agenticiam serve`/`gui`, the wizard is checking
   and writing to the server's machine, not yours.
-- **Goose has no per-agent model profile.** `GOOSE_PROVIDER`/`GOOSE_MODEL`
-  are global settings shared by every Goose session; there's no way to
-  give two agents different default models both baked permanently into
-  config.yaml. So by default the wizard leaves your global provider/model
-  alone and just hands you a launch command with `--provider`/`--model`
-  overrides for that one session. Checking "set as Goose's default" in
-  step 4 will change `GOOSE_PROVIDER`/`GOOSE_MODEL` globally — that
-  affects every future `goose session`, not just this agent.
+- **Goose has no per-agent model profile, and `goose session` takes no
+  `--provider`/`--model` flags** (only `goose run` does — verified
+  against a real install, not just docs). `GOOSE_PROVIDER`/`GOOSE_MODEL`
+  are global settings in config.yaml, read from the environment too. So
+  by default the wizard leaves your global provider/model alone and hands
+  you a launch command that sets `GOOSE_PROVIDER`/`GOOSE_MODEL` as
+  environment variables for just that one invocation. Checking "set as
+  Goose's default" in step 4 writes them into config.yaml instead — that
+  affects every future `goose session`, not just this agent, and the
+  launch command becomes the plain `goose session -n <name>` since the
+  override is no longer needed.
 - If writing `config.yaml` fails (permissions, read-only filesystem, ...)
   the agent identity/role/key are still created — you just get the raw
   YAML `extensions` snippet to paste in by hand instead of losing the
   work. The directory is the source of truth; the config write is
   best-effort.
+- **Either shipped executable works as the extension's command.** The GUI
+  exe isn't GUI-only: run it with any arguments (`agenticiam-gui mcp`,
+  `agenticiam-gui init`, ...) and it behaves exactly like the CLI exe;
+  with none, it opens the browser. So the wizard always points the
+  extension at whichever binary is actually running the server, and it
+  works whether you have one executable on disk or both.
 
 ## Integrating with Claude Desktop / Claude Code / Claude Cowork (MCP)
 
@@ -252,11 +261,16 @@ agenticiam audit tail [-n LIMIT]
 
 ```bash
 ./scripts/build.sh
-# -> dist/agenticiam            CLI (console app)                (Linux/macOS)
-# -> dist/agenticiam.exe        CLI (console app)                (Windows)
-# -> dist/agenticiam-gui        GUI (opens a browser, no console) (Linux/macOS)
-# -> dist/agenticiam-gui.exe    GUI (opens a browser, no console) (Windows)
+# -> dist/agenticiam            console app; run with no args for --help  (Linux/macOS)
+# -> dist/agenticiam.exe        console app; run with no args for --help  (Windows)
+# -> dist/agenticiam-gui        no console; run with no args to open the browser,
+# -> dist/agenticiam-gui.exe    or with any argument (e.g. `mcp`) to behave like the CLI
 ```
+
+You only need one of the two — `agenticiam-gui` handles both the double-click
+case and the CLI case (`agenticiam-gui mcp`, `agenticiam-gui init`, ...).
+`agenticiam` (console, no browser-opening) exists for scripting/CI contexts
+where you never want it trying to launch a browser.
 
 One `pyinstaller agenticiam.spec` invocation builds both executables.
 PyInstaller doesn't cross-compile — build on the OS you're targeting.
