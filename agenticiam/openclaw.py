@@ -4,11 +4,17 @@ gateway that connects chat apps to AI agents.
 Unlike Goose, we never write to OpenClaw's own config file directly: it's
 JSON5 (comments, trailing commas) which Python's stdlib `json` can't
 round-trip safely, and OpenClaw ships a purpose-built CLI for exactly this
-job (`openclaw mcp add`, `openclaw agents add`) that handles the config
-file safely on our behalf. So this module only *generates commands* for
-the user to run, plus (for the one piece that's a plain text file, not
-JSON5) writes a manager agent's `SOUL.md` directly, mirroring how
-goose.write_manager_recipe works.
+job (`openclaw mcp add`, `openclaw agents add`, `openclaw config get/set`)
+that handles the config file safely on our behalf. Two call shapes live
+here side by side: functions that *generate commands* for the user to run
+themselves (one-time setup — install, MCP registration, agent creation),
+and functions that *run the CLI directly* as a subprocess on this same
+machine (list_agents, get_agent_config, set_agent_*, get/set_website_
+allowlist) for live agent visibility and permission management, the same
+way goose.run_agent_task shells out directly for dispatch. Both rely on
+the CLI, never on parsing/writing openclaw.json ourselves. The one plain
+text file involved, a manager agent's `SOUL.md`, is written directly,
+mirroring goose.write_manager_recipe.
 
 Confirmed against OpenClaw's own docs (docs.openclaw.ai / the openclaw/openclaw
 GitHub docs source), not guessed:
@@ -19,6 +25,17 @@ GitHub docs source), not guessed:
   --workspace <dir>` creates an isolated agent persona; `--non-interactive`
   requires `--workspace`. Each agent's workspace holds a `SOUL.md` file that
   defines its persona/system prompt.
+- `openclaw agents list --json` lists every agent OpenClaw knows about.
+- `openclaw config get '<path>' --json` / `config set '<path>' '<json>'
+  --strict-json [--merge]` read/write arbitrary config paths; array
+  elements are addressed by index, e.g. `agents.list[0].tools.allow`.
+- Per-agent permissions live under `agents.list[<idx>].tools.allow`/`.deny`
+  (tool-level gating — file tools, the `browser` tool, etc.) and
+  `agents.list[<idx>].sandbox.*` (docker.binds for filesystem paths,
+  workspaceAccess, docker.network) — see TOOL_CATALOG and set_agent_*.
+- Website/domain restriction (`browser.ssrfPolicy.hostnameAllowlist`) is
+  GLOBAL only — OpenClaw has no per-agent domain allowlist, only a
+  per-agent on/off toggle for the `browser` tool itself.
 - Custom model providers (including Ollama Cloud, which isn't one of
   OpenClaw's built-in provider ids) go under `models.providers.<id>` —
   `baseUrl`/`apiKey`/`api` fields, `api: "openai-completions"` for
@@ -30,6 +47,7 @@ GitHub docs source), not guessed:
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for callers)
@@ -37,9 +55,159 @@ from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 OLLAMA_CLOUD_PROVIDER_ID = "ollama-cloud"
 
+DEFAULT_CLI_TIMEOUT = 15.0
+
+# Real, confirmed-against-docs tool ids OpenClaw's `agents.list[].tools.allow`
+# / `.deny` gate applies to — grouped for the permissions UI. "Web access"
+# gating the `browser` tool is deliberately coarse (on/off): OpenClaw has no
+# per-agent website/domain allowlist, only a *global* one (see
+# get_website_allowlist/set_website_allowlist below, under
+# browser.ssrfPolicy.hostnameAllowlist) shared by every agent with browser
+# access enabled.
+TOOL_CATALOG = {
+    "File access": ["read", "write", "edit", "process", "bash"],
+    "Web access": ["browser"],
+    "Other": ["cron", "discord", "gateway", "canvas", "nodes", "sessions_list", "sessions_history", "sessions_send", "sessions_spawn"],
+}
+
+
+class OpenClawCliError(Exception):
+    pass
+
 
 def find_openclaw_binary() -> str:
     return shutil.which("openclaw")
+
+
+def _run_openclaw(args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> str:
+    """Runs an `openclaw` subcommand and returns its stdout as a string.
+
+    Mirrors goose.run_agent_task's subprocess handling (same CREATE_NO_WINDOW
+    reasoning on Windows, same defensive-against-None-stdout guard learned
+    the hard way from a real field report against that function).
+    """
+    binary = openclaw_binary or find_openclaw_binary() or "openclaw"
+    cmd = [binary, *args]
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **popen_kwargs)
+    except FileNotFoundError as exc:
+        raise OpenClawCliError(f"openclaw executable not found ({binary})") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise OpenClawCliError(f"openclaw {' '.join(args)} timed out after {timeout}s") from exc
+    if result.returncode != 0:
+        raise OpenClawCliError((result.stderr or "").strip() or f"openclaw {' '.join(args)} exited with status {result.returncode}")
+    return result.stdout or ""
+
+
+def _run_openclaw_json(args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT):
+    out = _run_openclaw(args, openclaw_binary=openclaw_binary, timeout=timeout).strip()
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError as exc:
+        raise OpenClawCliError(f"openclaw {' '.join(args)} produced non-JSON output: {out[:200]!r}") from exc
+
+
+def list_agents(openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> list:
+    """Every agent OpenClaw currently knows about — not just ones AgenticIAM
+    created — via `openclaw agents list --json`."""
+    data = _run_openclaw_json(["agents", "list", "--json"], openclaw_binary=openclaw_binary, timeout=timeout)
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    return data.get("agents", [])
+
+
+def _agent_index(agent_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> int:
+    for i, agent in enumerate(list_agents(openclaw_binary=openclaw_binary, timeout=timeout)):
+        if agent.get("id") == agent_id:
+            return i
+    raise OpenClawCliError(f"no OpenClaw agent with id {agent_id!r}")
+
+
+def get_agent_config(agent_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> dict:
+    """Full config subtree (model, workspace, tools.allow/deny, sandbox...)
+    for one agent, via `openclaw config get 'agents.list[<idx>]' --json`."""
+    idx = _agent_index(agent_id, openclaw_binary=openclaw_binary, timeout=timeout)
+    data = _run_openclaw_json(
+        ["config", "get", f"agents.list[{idx}]", "--json"], openclaw_binary=openclaw_binary, timeout=timeout
+    )
+    return data or {}
+
+
+def _set_agent_path(
+    agent_id: str, path_suffix: str, value, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+) -> None:
+    idx = _agent_index(agent_id, openclaw_binary=openclaw_binary, timeout=timeout)
+    path = f"agents.list[{idx}].{path_suffix}"
+    _run_openclaw(
+        ["config", "set", path, json.dumps(value), "--strict-json"], openclaw_binary=openclaw_binary, timeout=timeout
+    )
+
+
+def set_agent_tools(
+    agent_id: str, allow: list = None, deny: list = None, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+) -> None:
+    """Replaces agents.list[<idx>].tools.allow and/or .deny wholesale — the
+    UI sends the complete desired list each time, not a delta, so a plain
+    (non-merge) `config set` on the specific leaf path is correct: it
+    replaces just that array without touching sibling tools.* fields."""
+    if allow is not None:
+        _set_agent_path(agent_id, "tools.allow", allow, openclaw_binary=openclaw_binary, timeout=timeout)
+    if deny is not None:
+        _set_agent_path(agent_id, "tools.deny", deny, openclaw_binary=openclaw_binary, timeout=timeout)
+
+
+def set_agent_filesystem_binds(
+    agent_id: str, binds: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+) -> None:
+    """Replaces agents.list[<idx>].sandbox.docker.binds — "host:container:ro"
+    / "host:container:rw" strings — OpenClaw's actual per-path filesystem
+    access control. Only takes effect while that agent is sandboxed (docker
+    backend); outside a sandbox there's no per-path allowlist to set."""
+    _set_agent_path(agent_id, "sandbox.docker.binds", binds, openclaw_binary=openclaw_binary, timeout=timeout)
+
+
+def set_agent_sandbox(
+    agent_id: str,
+    mode: str = None,
+    workspace_access: str = None,
+    network: str = None,
+    openclaw_binary: str = None,
+    timeout: float = DEFAULT_CLI_TIMEOUT,
+) -> None:
+    """mode: off | non-main | all. workspace_access: none | ro | rw.
+    network: "none" to cut the sandboxed agent off from the network
+    entirely, or omit/None to leave the default (allowed) in place."""
+    if mode is not None:
+        _set_agent_path(agent_id, "sandbox.mode", mode, openclaw_binary=openclaw_binary, timeout=timeout)
+    if workspace_access is not None:
+        _set_agent_path(agent_id, "sandbox.workspaceAccess", workspace_access, openclaw_binary=openclaw_binary, timeout=timeout)
+    if network is not None:
+        _set_agent_path(agent_id, "sandbox.docker.network", network, openclaw_binary=openclaw_binary, timeout=timeout)
+
+
+def get_website_allowlist(openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> list:
+    """browser.ssrfPolicy.hostnameAllowlist — GLOBAL, not per-agent: OpenClaw
+    has no per-agent website/domain allowlist. Every agent with the
+    `browser` tool enabled (see TOOL_CATALOG / set_agent_tools) shares this
+    same list."""
+    data = _run_openclaw_json(
+        ["config", "get", "browser.ssrfPolicy.hostnameAllowlist", "--json"], openclaw_binary=openclaw_binary, timeout=timeout
+    )
+    return data or []
+
+
+def set_website_allowlist(hostnames: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:
+    _run_openclaw(
+        ["config", "set", "browser.ssrfPolicy.hostnameAllowlist", json.dumps(hostnames), "--strict-json"],
+        openclaw_binary=openclaw_binary, timeout=timeout,
+    )
 
 
 def install_commands() -> dict:

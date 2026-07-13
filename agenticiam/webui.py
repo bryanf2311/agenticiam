@@ -194,7 +194,7 @@ function showLogin() {
 
 const SECTIONS = [
   ['setup', 'Setup'], ['identities', 'Identities'], ['groups', 'Groups'], ['roles', 'Roles'],
-  ['keys', 'Tokens & Keys'], ['mcp', 'MCP / Agent Setup'], ['audit', 'Audit Log'],
+  ['keys', 'Tokens & Keys'], ['mcp', 'MCP / Agent Setup'], ['openclaw', 'OpenClaw Agents'], ['audit', 'Audit Log'],
 ];
 let currentSection = 'identities';
 
@@ -226,7 +226,7 @@ function selectSection(id) {
   document.querySelectorAll('#section-links a[data-section]').forEach(a => a.classList.toggle('active', a.dataset.section === id));
   const renderers = {
     setup: renderSetup, identities: renderIdentities, groups: renderGroups, roles: renderRoles, keys: renderKeys,
-    mcp: renderMcp, audit: renderAudit, newagent: renderWizard,
+    mcp: renderMcp, openclaw: renderOpenclaw, audit: renderAudit, newagent: renderWizard,
   };
   renderers[id]();
 }
@@ -730,6 +730,148 @@ async function renderSetup() {
       } catch (err) { out.innerHTML = errBox(err); }
     });
   } catch (err) { content.innerHTML = errBox(err); }
+}
+
+let openclawToolCatalog = null;
+
+async function renderOpenclaw() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<h2>OpenClaw Agents</h2><div id="content">Loading…</div>';
+  const content = document.getElementById('content');
+  try {
+    const [status, agentsRes] = await Promise.all([api('/v1/admin/goose/status'), api('/v1/admin/openclaw/agents')]);
+    if (!agentsRes.available) {
+      content.innerHTML = `<div class="panel">
+        <p class="err">${esc(agentsRes.error || 'OpenClaw is not reachable from this server.')}</p>
+        ${!status.openclaw_installed ? '<p class="hint">See the <a href="#" id="openclaw-goto-setup">Setup</a> tab for install commands.</p>' : '<p class="hint">Is <span class="mono">openclaw gateway</span> running on this machine?</p>'}
+      </div>`;
+      const link = document.getElementById('openclaw-goto-setup');
+      if (link) link.addEventListener('click', (e) => { e.preventDefault(); selectSection('setup'); });
+      return;
+    }
+    if (!openclawToolCatalog) openclawToolCatalog = await api('/v1/admin/openclaw/tool-catalog');
+    const agents = agentsRes.agents;
+    content.innerHTML = `
+      <div class="two-col">
+        <div>
+          <p class="hint">Every agent OpenClaw currently knows about on this machine — not just ones created through the wizard.</p>
+          <table><thead><tr><th>ID</th><th>Model</th><th></th></tr></thead>
+          <tbody>${agents.map(a => `<tr><td class="mono">${esc(a.id)}</td><td class="hint">${esc(a.model || '')}</td>
+            <td><button class="secondary" data-agent="${esc(a.id)}">Manage permissions</button></td></tr>`).join('') || '<tr><td class="hint" colspan="3">No agents yet — create one from the New Agent wizard (target: OpenClaw).</td></tr>'}</tbody></table>
+          <div class="panel" id="openclaw-website-panel">
+            <h3>Allowed websites <span class="hint">(global)</span></h3>
+            <p class="hint">OpenClaw has no per-agent website allowlist — this hostname list is shared by <strong>every</strong> agent that has the "browser" tool enabled below, not just one. Leave empty to allow any site the browser tool navigates to.</p>
+            <div id="openclaw-website-body">Loading…</div>
+          </div>
+        </div>
+        <div id="openclaw-detail" class="panel"><span class="hint">Select an agent to manage its permissions.</span></div>
+      </div>`;
+    content.querySelectorAll('button[data-agent]').forEach(b => b.addEventListener('click', () => renderOpenclawAgentDetail(b.dataset.agent)));
+    renderOpenclawWebsiteAllowlist();
+  } catch (err) { content.innerHTML = errBox(err); }
+}
+
+async function renderOpenclawWebsiteAllowlist() {
+  const body = document.getElementById('openclaw-website-body');
+  try {
+    const res = await api('/v1/admin/openclaw/website-allowlist');
+    body.innerHTML = `
+      <label>One hostname per line (e.g. example.com or *.example.com)</label>
+      <textarea id="openclaw-website-list" rows="4">${esc(res.hostnames.join('\\n'))}</textarea>
+      <div class="submit-row"><button id="openclaw-website-save">Save</button></div>
+      <div id="openclaw-website-msg"></div>`;
+    document.getElementById('openclaw-website-save').addEventListener('click', async () => {
+      const msg = document.getElementById('openclaw-website-msg');
+      const hostnames = document.getElementById('openclaw-website-list').value.split('\\n').map(s => s.trim()).filter(Boolean);
+      msg.innerHTML = '';
+      try {
+        await api('/v1/admin/openclaw/website-allowlist', { method: 'PUT', json: { hostnames } });
+        msg.innerHTML = '<div class="ok">Saved.</div>';
+      } catch (err) { msg.innerHTML = errBox(err); }
+    });
+  } catch (err) { body.innerHTML = errBox(err); }
+}
+
+function openclawToolState(tools, toolId) {
+  if ((tools.allow || []).includes(toolId)) return 'allow';
+  if ((tools.deny || []).includes(toolId)) return 'deny';
+  return 'default';
+}
+
+async function renderOpenclawAgentDetail(agentId) {
+  const detail = document.getElementById('openclaw-detail');
+  detail.innerHTML = 'Loading…';
+  try {
+    const cfg = await api('/v1/admin/openclaw/agents/' + encodeURIComponent(agentId));
+    const tools = cfg.tools || {};
+    const sandbox = cfg.sandbox || {};
+    const docker = sandbox.docker || {};
+    const binds = docker.binds || [];
+    detail.innerHTML = `
+      <h3>${esc(agentId)}</h3>
+      <h4>Tool permissions</h4>
+      <p class="hint">Default = inherits the global policy. Allow/Deny overrides it for this agent only. A tool denied globally can't be brought back by allowing it here.</p>
+      ${Object.entries(openclawToolCatalog).map(([group, toolIds]) => `
+        <div style="margin:10px 0">
+          <strong>${esc(group)}</strong>
+          ${toolIds.map(toolId => {
+            const state = openclawToolState(tools, toolId);
+            return `<div style="display:flex;align-items:center;gap:12px;margin:4px 0 4px 12px">
+              <span class="mono" style="flex:1">${esc(toolId)}</span>
+              ${['default', 'allow', 'deny'].map(v => `
+                <label style="display:flex;align-items:center;gap:4px">
+                  <input type="radio" name="tool-${esc(toolId)}" value="${v}" ${state === v ? 'checked' : ''} style="width:auto">
+                  <span class="hint">${v}</span>
+                </label>`).join('')}
+            </div>`;
+          }).join('')}
+        </div>`).join('')}
+      <h4 style="margin-top:20px">Sandbox</h4>
+      <p class="hint">Filesystem binds and network isolation only take effect while this agent is sandboxed (mode below is not "off").</p>
+      <label>Sandbox mode</label>
+      <select id="openclaw-sandbox-mode">
+        ${['(unchanged)', 'off', 'non-main', 'all'].map(v => `<option value="${v === '(unchanged)' ? '' : v}" ${sandbox.mode === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+      </select>
+      <label>Workspace access</label>
+      <select id="openclaw-workspace-access">
+        ${['(unchanged)', 'none', 'ro', 'rw'].map(v => `<option value="${v === '(unchanged)' ? '' : v}" ${sandbox.workspaceAccess === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+      </select>
+      <label>Network</label>
+      <select id="openclaw-sandbox-network">
+        ${['(unchanged)', 'none'].map(v => `<option value="${v === '(unchanged)' ? '' : v}" ${docker.network === v ? 'selected' : ''}>${v === 'none' ? 'none (block all network)' : esc(v)}</option>`).join('')}
+      </select>
+      <h4 style="margin-top:20px">Filesystem access</h4>
+      <p class="hint">One bind per line: <span class="mono">/host/path:/container/path:ro</span> or <span class="mono">:rw</span>. Only these paths are reachable inside the sandbox.</p>
+      <textarea id="openclaw-binds" rows="4">${esc(binds.join('\\n'))}</textarea>
+      <div class="submit-row"><button id="openclaw-save-permissions">Save permissions</button></div>
+      <div id="openclaw-detail-msg"></div>`;
+    document.getElementById('openclaw-save-permissions').addEventListener('click', async () => {
+      const msg = document.getElementById('openclaw-detail-msg');
+      msg.innerHTML = '';
+      const allow = [];
+      const deny = [];
+      Object.values(openclawToolCatalog).flat().forEach(toolId => {
+        const checked = detail.querySelector(`input[name="tool-${toolId}"]:checked`);
+        const v = checked ? checked.value : 'default';
+        if (v === 'allow') allow.push(toolId);
+        if (v === 'deny') deny.push(toolId);
+      });
+      const payload = {
+        tools_allow: allow, tools_deny: deny,
+        filesystem_binds: document.getElementById('openclaw-binds').value.split('\\n').map(s => s.trim()).filter(Boolean),
+      };
+      const mode = document.getElementById('openclaw-sandbox-mode').value;
+      const workspaceAccess = document.getElementById('openclaw-workspace-access').value;
+      const network = document.getElementById('openclaw-sandbox-network').value;
+      if (mode) payload.sandbox_mode = mode;
+      if (workspaceAccess) payload.workspace_access = workspaceAccess;
+      if (network) payload.sandbox_network = network;
+      try {
+        await api('/v1/admin/openclaw/agents/' + encodeURIComponent(agentId) + '/permissions', { method: 'PUT', json: payload });
+        msg.innerHTML = '<div class="ok">Saved.</div>';
+      } catch (err) { msg.innerHTML = errBox(err); }
+    });
+  } catch (err) { detail.innerHTML = errBox(err); }
 }
 
 async function renderIdentities() {

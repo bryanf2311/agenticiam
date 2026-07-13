@@ -538,6 +538,41 @@ a revocable API key instead of an OAuth token:
 # revoke it any time with: agenticiam api-key revoke <key-id>
 ```
 
+## OpenClaw Agents tab: live agent list & permissions
+
+Unlike the rest of OpenClaw integration (which generates commands for you
+to run), this tab shells out to the local `openclaw` CLI directly from
+AgenticIAM's own server — the same way dispatch already shells out to
+`goose` — so it needs `openclaw` installed on whichever machine is running
+`agenticiam serve`/`gui`.
+
+It shows every agent OpenClaw currently knows about (`openclaw agents
+list --json`), not just ones created through the wizard, and lets you
+edit each one's real permissions in place:
+
+- **Tool permissions** — per agent, per tool (`read`, `write`, `edit`,
+  `process`, `bash`, `browser`, `cron`, `discord`, `gateway`, `canvas`,
+  `nodes`, the `sessions_*` tools): Default (inherits the global policy),
+  Allow, or Deny. Writes to `agents.list[<idx>].tools.allow`/`.deny`.
+- **Filesystem access** — a list of `host:container:ro`/`:rw` bind
+  mounts (`agents.list[<idx>].sandbox.docker.binds`), OpenClaw's actual
+  per-path access control. This — and the network setting below — only
+  takes effect while the agent is sandboxed (mode isn't "off"); outside a
+  sandbox, an agent with `read`/`write` allowed has ordinary host
+  filesystem access and there's no per-path allowlist to layer on top.
+- **Sandbox settings** — mode (`off`/`non-main`/`all`), workspace access
+  (`none`/`ro`/`rw`), and network (default, or `none` to cut a sandboxed
+  agent off entirely).
+- **Website access** — OpenClaw has no per-agent domain allowlist, only a
+  per-agent on/off toggle for the `browser` tool (above) plus one
+  **global** hostname allowlist (`browser.ssrfPolicy.hostnameAllowlist`)
+  shared by every agent with browser access enabled. The tab surfaces
+  both, with the global list clearly labeled as affecting every agent,
+  not just the one you're editing.
+
+If `openclaw` isn't installed, or the gateway isn't reachable, the tab
+says so and points at the Setup tab instead of failing silently.
+
 ## CLI reference
 
 ```

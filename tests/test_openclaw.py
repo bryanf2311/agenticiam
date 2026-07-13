@@ -1,6 +1,15 @@
 import json
 
+import pytest
+
 from agenticiam import openclaw
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def test_mcp_add_commands_quote_token_per_shell():
@@ -92,3 +101,224 @@ def test_install_commands_has_all_three_shells():
     assert "openclaw onboard" in commands["bash"]
     assert "openclaw.ai/install.ps1" in commands["powershell"]
     assert "cmd" in commands
+
+
+# ---------------------------------------------------------------- direct CLI integration
+
+
+def test_run_openclaw_returns_stdout(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="hello\n")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    result = openclaw._run_openclaw(["agents", "list", "--json"], openclaw_binary="openclaw")
+    assert result == "hello\n"
+    assert captured["cmd"] == ["openclaw", "agents", "list", "--json"]
+
+
+def test_run_openclaw_nonzero_exit_raises(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout="", stderr="boom"),
+    )
+    with pytest.raises(openclaw.OpenClawCliError, match="boom"):
+        openclaw._run_openclaw(["agents", "list"], openclaw_binary="openclaw")
+
+
+def test_run_openclaw_none_stdout_and_stderr_do_not_crash(monkeypatch):
+    # Same defensive fix applied to goose.run_agent_task after a real field
+    # report — guard here from the start rather than waiting for a repeat.
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout=None, stderr=None),
+    )
+    with pytest.raises(openclaw.OpenClawCliError, match="exited with status 1"):
+        openclaw._run_openclaw(["agents", "list"], openclaw_binary="openclaw")
+
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=None, stderr=""),
+    )
+    assert openclaw._run_openclaw(["agents", "list"], openclaw_binary="openclaw") == ""
+
+
+def test_run_openclaw_missing_binary_raises(monkeypatch):
+    def fake_run(*a, **k):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    with pytest.raises(openclaw.OpenClawCliError, match="not found"):
+        openclaw._run_openclaw(["agents", "list"], openclaw_binary="openclaw")
+
+
+def test_run_openclaw_timeout_raises(monkeypatch):
+    def fake_run(*a, **k):
+        raise openclaw.subprocess.TimeoutExpired(cmd="openclaw", timeout=5)
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    with pytest.raises(openclaw.OpenClawCliError, match="timed out"):
+        openclaw._run_openclaw(["agents", "list"], openclaw_binary="openclaw", timeout=5)
+
+
+def test_run_openclaw_json_parses_output(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout='{"a": 1}\n'),
+    )
+    assert openclaw._run_openclaw_json(["config", "get", "x"], openclaw_binary="openclaw") == {"a": 1}
+
+
+def test_run_openclaw_json_empty_output_is_none(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=""),
+    )
+    assert openclaw._run_openclaw_json(["config", "get", "x"], openclaw_binary="openclaw") is None
+
+
+def test_run_openclaw_json_invalid_json_raises(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="not json"),
+    )
+    with pytest.raises(openclaw.OpenClawCliError, match="non-JSON"):
+        openclaw._run_openclaw_json(["config", "get", "x"], openclaw_binary="openclaw")
+
+
+def test_list_agents_unwraps_agents_key(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=json.dumps({"agents": [{"id": "boss"}]})),
+    )
+    assert openclaw.list_agents(openclaw_binary="openclaw") == [{"id": "boss"}]
+
+
+def test_list_agents_accepts_bare_list(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=json.dumps([{"id": "boss"}])),
+    )
+    assert openclaw.list_agents(openclaw_binary="openclaw") == [{"id": "boss"}]
+
+
+def test_list_agents_empty_output_returns_empty_list(monkeypatch):
+    monkeypatch.setattr(openclaw.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=""))
+    assert openclaw.list_agents(openclaw_binary="openclaw") == []
+
+
+def test_agent_index_finds_matching_id(monkeypatch):
+    monkeypatch.setattr(
+        openclaw, "list_agents", lambda openclaw_binary=None, timeout=openclaw.DEFAULT_CLI_TIMEOUT: [
+            {"id": "intern"}, {"id": "boss"},
+        ],
+    )
+    assert openclaw._agent_index("boss") == 1
+
+
+def test_agent_index_missing_id_raises(monkeypatch):
+    monkeypatch.setattr(
+        openclaw, "list_agents", lambda openclaw_binary=None, timeout=openclaw.DEFAULT_CLI_TIMEOUT: [{"id": "intern"}]
+    )
+    with pytest.raises(openclaw.OpenClawCliError, match="no OpenClaw agent"):
+        openclaw._agent_index("boss")
+
+
+def test_get_agent_config_uses_index_in_path(monkeypatch):
+    monkeypatch.setattr(openclaw, "_agent_index", lambda agent_id, **k: 2)
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout=json.dumps({"id": "boss", "tools": {"allow": ["read"]}}))
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    result = openclaw.get_agent_config("boss", openclaw_binary="openclaw")
+    assert result == {"id": "boss", "tools": {"allow": ["read"]}}
+    assert captured["cmd"] == ["openclaw", "config", "get", "agents.list[2]", "--json"]
+
+
+def test_set_agent_tools_only_writes_provided_fields(monkeypatch):
+    monkeypatch.setattr(openclaw, "_agent_index", lambda agent_id, **k: 0)
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.set_agent_tools("boss", allow=["read", "write"], openclaw_binary="openclaw")
+    assert len(calls) == 1
+    assert calls[0] == [
+        "openclaw", "config", "set", "agents.list[0].tools.allow", json.dumps(["read", "write"]), "--strict-json",
+    ]
+
+
+def test_set_agent_tools_writes_allow_and_deny_separately(monkeypatch):
+    monkeypatch.setattr(openclaw, "_agent_index", lambda agent_id, **k: 0)
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.set_agent_tools("boss", allow=["read"], deny=["browser"], openclaw_binary="openclaw")
+    paths = [c[3] for c in calls]
+    assert paths == ["agents.list[0].tools.allow", "agents.list[0].tools.deny"]
+
+
+def test_set_agent_filesystem_binds(monkeypatch):
+    monkeypatch.setattr(openclaw, "_agent_index", lambda agent_id, **k: 3)
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.set_agent_filesystem_binds("boss", ["/data:/data:ro"], openclaw_binary="openclaw")
+    assert captured["cmd"][3] == "agents.list[3].sandbox.docker.binds"
+    assert json.loads(captured["cmd"][4]) == ["/data:/data:ro"]
+
+
+def test_set_agent_sandbox_writes_only_given_fields(monkeypatch):
+    monkeypatch.setattr(openclaw, "_agent_index", lambda agent_id, **k: 0)
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.set_agent_sandbox("boss", network="none", openclaw_binary="openclaw")
+    assert len(calls) == 1
+    assert calls[0][3] == "agents.list[0].sandbox.docker.network"
+    assert json.loads(calls[0][4]) == "none"
+
+
+def test_get_website_allowlist_defaults_to_empty_list(monkeypatch):
+    monkeypatch.setattr(openclaw.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=""))
+    assert openclaw.get_website_allowlist(openclaw_binary="openclaw") == []
+
+
+def test_set_website_allowlist_writes_global_path(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.set_website_allowlist(["example.com"], openclaw_binary="openclaw")
+    assert captured["cmd"] == [
+        "openclaw", "config", "set", "browser.ssrfPolicy.hostnameAllowlist", json.dumps(["example.com"]), "--strict-json",
+    ]
+
+
+def test_tool_catalog_groups_cover_expected_tools():
+    assert "browser" in openclaw.TOOL_CATALOG["Web access"]
+    assert "read" in openclaw.TOOL_CATALOG["File access"]
+    assert "write" in openclaw.TOOL_CATALOG["File access"]

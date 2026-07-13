@@ -910,6 +910,112 @@ def create_app(db_path=None) -> Flask:
         )
         return jsonify(result), 201
 
+    # ------------------------------------------------------------ admin: openclaw agents & permissions
+    #
+    # These shell out to the local `openclaw` CLI directly (see openclaw.py's
+    # module docstring) rather than generating copy-paste commands, so the
+    # list reflects every agent OpenClaw actually knows about right now, not
+    # just ones created through this app's wizard.
+    def _string_list_field(data, key):
+        """None if the key is absent (caller leaves that field untouched);
+        raises ValueError if present but not a list of strings."""
+        if key not in data:
+            return None
+        value = data[key]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"{key} must be a list of strings")
+        return value
+
+    @app.get("/v1/admin/openclaw/agents")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_list_agents():
+        if not openclaw.find_openclaw_binary():
+            return jsonify({"available": False, "agents": [], "error": "openclaw is not installed on this server"})
+        try:
+            return jsonify({"available": True, "agents": openclaw.list_agents()})
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"available": False, "agents": [], "error": str(exc)})
+
+    @app.get("/v1/admin/openclaw/agents/<agent_id>")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_get_agent(agent_id):
+        try:
+            return jsonify(openclaw.get_agent_config(agent_id))
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+
+    @app.put("/v1/admin/openclaw/agents/<agent_id>/permissions")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_set_agent_permissions(agent_id):
+        data = request.get_json(force=True)
+        try:
+            tools_allow = _string_list_field(data, "tools_allow")
+            tools_deny = _string_list_field(data, "tools_deny")
+            filesystem_binds = _string_list_field(data, "filesystem_binds")
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "error_description": str(exc)}), 400
+        sandbox_mode = data.get("sandbox_mode")
+        workspace_access = data.get("workspace_access")
+        sandbox_network = data.get("sandbox_network")
+        try:
+            if tools_allow is not None or tools_deny is not None:
+                openclaw.set_agent_tools(agent_id, allow=tools_allow, deny=tools_deny)
+            if filesystem_binds is not None:
+                openclaw.set_agent_filesystem_binds(agent_id, filesystem_binds)
+            if sandbox_mode is not None or workspace_access is not None or sandbox_network is not None:
+                openclaw.set_agent_sandbox(
+                    agent_id, mode=sandbox_mode, workspace_access=workspace_access, network=sandbox_network
+                )
+            updated = openclaw.get_agent_config(agent_id)
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+        actor = _actor()
+        audit.log(
+            get_directory().conn, "openclaw.set_agent_permissions", "success",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            resource=f"openclaw-agent:{agent_id}",
+            detail={
+                "tools_allow": tools_allow, "tools_deny": tools_deny, "filesystem_binds": filesystem_binds,
+                "sandbox_mode": sandbox_mode, "workspace_access": workspace_access, "sandbox_network": sandbox_network,
+            },
+        )
+        return jsonify(updated)
+
+    @app.get("/v1/admin/openclaw/website-allowlist")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_get_website_allowlist():
+        try:
+            return jsonify({"hostnames": openclaw.get_website_allowlist()})
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+
+    @app.put("/v1/admin/openclaw/website-allowlist")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_set_website_allowlist():
+        data = request.get_json(force=True)
+        try:
+            hostnames = _string_list_field(data, "hostnames")
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "error_description": str(exc)}), 400
+        if hostnames is None:
+            return jsonify({"error": "invalid_request", "error_description": "hostnames is required"}), 400
+        try:
+            openclaw.set_website_allowlist(hostnames)
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+        actor = _actor()
+        audit.log(
+            get_directory().conn, "openclaw.set_website_allowlist", "success",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            detail={"hostnames": hostnames},
+        )
+        return jsonify({"hostnames": hostnames})
+
+    @app.get("/v1/admin/openclaw/tool-catalog")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_tool_catalog():
+        return jsonify(openclaw.TOOL_CATALOG)
+
     # ------------------------------------------------------------ admin: audit
     @app.get("/v1/admin/audit")
     @require_permission(ADMIN_PERMISSION)
