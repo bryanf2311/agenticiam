@@ -206,6 +206,63 @@ def save_config(config: dict) -> Path:
     return path
 
 
+def secrets_path() -> Path:
+    """Goose's file-backed secret store — used only when its OS keyring is
+    disabled (env var GOOSE_DISABLE_KEYRING, confirmed against
+    crates/goose/src/config/base.rs: `secret_storage()` falls back to
+    `SecretStorage::File { path: config_dir.join("secrets.yaml") }`, a flat
+    YAML key/value map, the same shape as config.yaml). Lives next to
+    config.yaml, same directory."""
+    return config_path().parent / "secrets.yaml"
+
+
+def load_secrets() -> dict:
+    path = secrets_path()
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data or {}
+
+
+def save_secrets(secrets: dict) -> Path:
+    path = secrets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_suffix(f".yaml.bak-{int(time.time())}")
+        shutil.copy2(path, backup)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(secrets, f, default_flow_style=False, sort_keys=False)
+    return path
+
+
+# The exact secret name Goose looks up for Ollama Cloud — confirmed
+# against Goose's own bundled fixed-provider definition
+# (crates/goose-providers/src/declarative/definitions/ollama_cloud.json:
+# "api_key_env": "OLLAMA_CLOUD_API_KEY"). Ollama Cloud is a *fixed*
+# (compile-time bundled) declarative provider, not something that needs a
+# custom_providers/*.json file written — the only missing piece for
+# `--provider ollama_cloud` to work standalone is this secret being
+# resolvable.
+OLLAMA_CLOUD_API_KEY_ENV = "OLLAMA_CLOUD_API_KEY"
+
+
+def write_ollama_cloud_secret(api_key: str) -> Path:
+    """Opt-in only (see launch_commands' auto_configure param) — writes the
+    key in *plaintext* to secrets.yaml on disk. This is a real, deliberate
+    departure from every other provider in this module, where the key is
+    never persisted anywhere and only ever appears transiently in a
+    one-time launch command. It exists because Goose's own ollama_cloud
+    provider code refuses env-var configuration entirely (see
+    GOOSE_ENV_UNCONFIGURABLE_PROVIDERS) — there is no transient option for
+    this one provider, only "store it via the interactive `goose configure`
+    keyring flow" or "store it in this file". Callers must surface that
+    tradeoff, not silently opt into it."""
+    secrets = load_secrets()
+    secrets[OLLAMA_CLOUD_API_KEY_ENV] = api_key
+    return save_secrets(secrets)
+
+
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     return slug or "agent"
@@ -474,6 +531,7 @@ def launch_commands(
     context_limit: int = None,
     api_key: str = None,
     recipe_path=None,
+    auto_configure: bool = False,
 ) -> dict:
     """Shell-specific commands to start an interactive Goose session for
     this agent.
@@ -506,7 +564,13 @@ def launch_commands(
     generates `goose run --provider <p> --model <m> --interactive`, which
     selects an *already-configured* provider — the caller is responsible
     for surfacing that the one-time `goose configure` setup is a
-    prerequisite (see the Setup tab / README).
+    prerequisite (see the Setup tab / README), unless `auto_configure` is
+    set (see write_ollama_cloud_secret) — in which case this adds
+    GOOSE_DISABLE_KEYRING=1 to the one-time command, scoped to just this
+    invocation, so the file-backed secret AgenticIAM wrote is actually what
+    Goose reads instead of trying (and missing) the OS keyring. It does not
+    touch config.yaml, so it has no effect on any other provider's
+    keyring-stored secrets in other Goose sessions.
     """
     env_unconfigurable = provider in GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
     if recipe_path:
@@ -535,6 +599,8 @@ def launch_commands(
             ps_parts.append(f'$env:{key}="{value}"')
         cmd_parts.append(f'set "{key}={value}"')
 
+    if env_unconfigurable and auto_configure:
+        add("GOOSE_DISABLE_KEYRING", "1")
     if model and not env_unconfigurable:
         provider = provider or "ollama"
         add("GOOSE_PROVIDER", provider)

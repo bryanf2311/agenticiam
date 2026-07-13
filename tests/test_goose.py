@@ -1,6 +1,7 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import pytest
 import yaml
@@ -301,6 +302,52 @@ def test_launch_commands_ollama_cloud_recipe_path_still_takes_priority():
     commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud", recipe_path="/x/boss.yaml")
     assert "--recipe '/x/boss.yaml'" in commands["bash"]
     assert "--provider ollama_cloud" not in commands["bash"]
+
+
+def test_launch_commands_ollama_cloud_auto_configure_adds_disable_keyring_env():
+    commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud", auto_configure=True)
+    assert commands["bash"] == "GOOSE_DISABLE_KEYRING=1 goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' --interactive -n boss"
+    assert '$env:GOOSE_DISABLE_KEYRING="1"' in commands["powershell"]
+    assert 'set "GOOSE_DISABLE_KEYRING=1"' in commands["cmd"]
+
+
+def test_launch_commands_auto_configure_ignored_for_normal_providers():
+    # auto_configure only matters for GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
+    commands = goose.launch_commands("bot", "ollama", "llama3.1:8b", auto_configure=True)
+    for variant in commands.values():
+        assert "GOOSE_DISABLE_KEYRING" not in variant
+
+
+def test_secrets_path_is_sibling_of_config_path(monkeypatch):
+    monkeypatch.setattr(goose, "config_path", lambda: Path("/x/goose/config.yaml"))
+    assert goose.secrets_path() == Path("/x/goose/secrets.yaml")
+
+
+def test_load_secrets_missing_file_returns_empty_dict(tmp_path, monkeypatch):
+    monkeypatch.setattr(goose, "secrets_path", lambda: tmp_path / "secrets.yaml")
+    assert goose.load_secrets() == {}
+
+
+def test_write_ollama_cloud_secret_creates_and_merges(tmp_path, monkeypatch):
+    path = tmp_path / "secrets.yaml"
+    monkeypatch.setattr(goose, "secrets_path", lambda: path)
+
+    goose.save_secrets({"SOME_OTHER_KEY": "unrelated-value"})
+    written = goose.write_ollama_cloud_secret("sk-fake-cloud-key")
+    assert written == path
+
+    result = goose.load_secrets()
+    assert result["SOME_OTHER_KEY"] == "unrelated-value"  # existing secrets preserved
+    assert result[goose.OLLAMA_CLOUD_API_KEY_ENV] == "sk-fake-cloud-key"
+
+
+def test_save_secrets_backs_up_existing_file(tmp_path, monkeypatch):
+    path = tmp_path / "secrets.yaml"
+    monkeypatch.setattr(goose, "secrets_path", lambda: path)
+    goose.save_secrets({"A": "1"})
+    goose.save_secrets({"A": "2"})
+    backups = list(tmp_path.glob("secrets.yaml.bak-*"))
+    assert len(backups) == 1
 
 
 def test_manager_recipe_yaml_has_required_fields_and_prompt_body():

@@ -238,18 +238,38 @@ an AgenticIAM limitation — it's how each runtime's own code handles it:
   *"Ollama Cloud must be configured as a declarative provider. Run `goose
   configure` to set it up."* Every other provider in this wizard can be
   selected purely through a one-time launch command's environment
-  variables; Ollama Cloud can't, by Goose's own design (the API key is
-  meant to go through `goose configure`'s interactive flow into its
-  keyring/secrets store, not a plaintext env var). So for a Goose-target
-  Ollama Cloud agent, step 5 shows a one-time-setup callout: run `goose
-  configure` once, choose **Ollama Cloud** (or "Add a Custom Provider"
-  with base URL `https://ollama.com/v1`, engine "OpenAI Compatible") and
-  paste the key there — Goose stores it itself, AgenticIAM never sees or
-  stores it either way. After that one-time step, the generated
-  `goose run --provider ollama_cloud --model <model> --interactive -n
-  <name>` command works normally (`--provider`/`--model` select an
-  already-configured provider, unlike env vars, which are the piece that's
-  blocked).
+  variables; Ollama Cloud can't, by Goose's own design. It's also
+  confirmed to be a *fixed* (compile-time bundled) declarative provider —
+  its definition ships inside the Goose binary itself
+  (`crates/goose-providers/src/declarative/definitions/ollama_cloud.json`,
+  `api_key_env: "OLLAMA_CLOUD_API_KEY"`) — so there's no need to hand-author
+  a custom provider; the only missing piece is that API key being
+  resolvable through Goose's own secret store. Two ways to give it that,
+  both shown in the wizard:
+  - **Manual (default)**: step 5 shows a one-time-setup callout — run
+    `goose configure` once, choose **Ollama Cloud** from the provider list,
+    paste the key there. Goose stores it in your OS keyring (Windows
+    Credential Manager / Keychain / Secret Service) — the most secure
+    option, but it's an interactive step you have to do yourself before
+    the generated command works.
+  - **Auto-configure (opt-in checkbox in step 2)**: skips that step
+    entirely. AgenticIAM writes the key directly to Goose's
+    `secrets.yaml` — confirmed from `crates/goose/src/config/base.rs`
+    to be a plain flat YAML file Goose falls back to when its OS keyring
+    is disabled via `GOOSE_DISABLE_KEYRING` — and the generated launch
+    command sets that env var, scoped to just that one invocation (never
+    written to config.yaml, so it has zero effect on any other provider's
+    keyring-stored secrets in other Goose sessions). The real tradeoff,
+    stated in the UI: **the key sits in plaintext on disk** instead of
+    your OS credential store — a genuine, deliberate exception to this
+    module's usual "never persist provider keys anywhere" rule, made only
+    because Goose leaves no other automatable option for this one
+    provider. Off by default; your call per agent.
+
+  Either way, once configured, the generated `goose run --provider
+  ollama_cloud --model <model> --interactive -n <name>` command works
+  normally (`--provider`/`--model` select an already-configured provider,
+  unlike env vars, which are the piece that's blocked).
 - **OpenClaw**: fully scriptable, no manual step. OpenClaw's model
   provider config (`models.providers.<id>`) is plain JSON reachable
   through its own `config set --merge` CLI, not a keyring-backed

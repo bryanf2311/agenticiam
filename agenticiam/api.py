@@ -815,7 +815,30 @@ def create_app(db_path=None) -> Flask:
 
         env_unconfigurable = provider in goose.GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
         if target == "goose":
-            result["goose_configure_required"] = env_unconfigurable
+            # Opt-in only: writes the Ollama Cloud API key in *plaintext* to
+            # Goose's secrets.yaml, unlike every other provider here where the
+            # key is never persisted anywhere. Meaningless for other providers
+            # or the OpenClaw target, so it's silently ignored there.
+            auto_configure = bool(data.get("auto_configure_ollama_cloud")) and env_unconfigurable
+            secret_path = None
+            secret_error = None
+            if auto_configure:
+                if not api_key:
+                    return jsonify({
+                        "error": "invalid_request",
+                        "error_description": "api_key is required to auto-configure Ollama Cloud",
+                    }), 400
+                try:
+                    secret_path = goose.write_ollama_cloud_secret(api_key)
+                except OSError as exc:
+                    secret_error = str(exc)
+                    auto_configure = False
+
+            result["goose_configure_required"] = env_unconfigurable and not auto_configure
+            result["ollama_cloud_auto_configured"] = auto_configure
+            result["ollama_cloud_secret_path"] = str(secret_path) if secret_path else None
+            result["ollama_cloud_secret_error"] = secret_error
+
             # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL/GOOSE_CONTEXT_LIMIT
             # into config.yaml, a per-invocation env override would just be redundant.
             # For env_unconfigurable providers, set_as_default is skipped entirely —
@@ -830,6 +853,7 @@ def create_app(db_path=None) -> Flask:
                 context_limit=None if set_default else context_limit,
                 api_key=api_key,
                 recipe_path=recipe_path,
+                auto_configure=auto_configure,
             )
             result["manager_recipe_path"] = str(recipe_path) if recipe_path else None
             result["manager_recipe_error"] = recipe_error

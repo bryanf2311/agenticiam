@@ -240,6 +240,7 @@ function resetWizard() {
   wizardStep = 1;
   wizardState = {
     status: null, target: 'goose', name: '', provider: 'ollama', model: '', apiKey: '',
+    autoConfigureOllamaCloud: false,
     contextLimit: '', permissions: [], customPermissions: '',
     dispatchWildcard: false, dispatchTargets: [], group: '',
     setDefault: false, cmd: '', args: '', result: null,
@@ -338,6 +339,13 @@ async function renderWizardStep2() {
         </div>
         <p class="hint">Used only to build the launch command in step 4 — AgenticIAM never stores this key anywhere (not in Goose's config.yaml, not in its own database).</p>
       </div>
+      ${wizardState.target === 'goose' && wizardState.provider === 'ollama_cloud' ? `
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+        <input type="checkbox" id="wiz-auto-configure-ollama-cloud" ${wizardState.autoConfigureOllamaCloud ? 'checked' : ''} style="width:auto">
+        <span>Automatically configure this for Goose (skip the manual <span class="mono">goose configure</span> step)</span>
+      </label>
+      <p class="hint">Writes this API key in <strong>plaintext</strong> to Goose's <span class="mono">secrets.yaml</span> on this machine, and sets <span class="mono">GOOSE_DISABLE_KEYRING=1</span> for just this one launch command — it doesn't touch your other providers or their OS-keyring-stored keys. Leave unchecked to keep the key out of any file: the normal <span class="mono">goose configure</span> step (~30 seconds, one time per machine, not per agent) stores it in Windows Credential Manager / Keychain / Secret Service instead.</p>
+      ` : ''}
       <label>Model</label>
       <div id="wiz-model-wrap">${isCloud ? '<span class="hint">Enter your API key above and click "Load models".</span>' : 'Loading…'}</div>
       <div class="submit-row row">
@@ -354,6 +362,7 @@ async function renderWizardStep2() {
     wizardState.name = document.getElementById('wiz-name').value.trim();
     wizardState.provider = e.target.value;
     wizardState.model = '';
+    if (wizardState.provider !== 'ollama_cloud') wizardState.autoConfigureOllamaCloud = false;
     renderWizardStep2();
   });
 
@@ -391,6 +400,8 @@ async function renderWizardStep2() {
     wizardState.model = modelSel ? modelSel.value : '';
     const apiKeyInput = document.getElementById('wiz-api-key');
     wizardState.apiKey = apiKeyInput ? apiKeyInput.value : '';
+    const autoConfigureCb = document.getElementById('wiz-auto-configure-ollama-cloud');
+    wizardState.autoConfigureOllamaCloud = autoConfigureCb ? autoConfigureCb.checked : false;
     wizardStep = 3; renderWizard();
   });
 }
@@ -533,6 +544,7 @@ function renderWizardStep4() {
         permissions: allPerms,
         group: wizardState.group || undefined,
         set_as_default: wizardState.setDefault,
+        auto_configure_ollama_cloud: wizardState.autoConfigureOllamaCloud,
         cmd: wizardState.cmd,
         args: wizardState.args.split(/\\s+/).filter(Boolean),
       } });
@@ -612,7 +624,13 @@ function renderWizardStep5() {
            <p>Add this to <span class="mono">${esc(r.config_path)}</span> by hand:</p>
            <textarea rows="9" readonly>${esc(r.manual_extension_snippet)}</textarea>`}
       ${r.goose_configure_required ? `
-      <div class="err">One-time setup required before the command below will work: Ollama Cloud can't be selected via environment variables in Goose (its own provider code requires this). Run <span class="mono">goose configure</span>, choose <strong>Ollama Cloud</strong> from the provider list (or "Add a Custom Provider" with base URL <span class="mono">https://ollama.com/v1</span> if it's not listed), and paste your Ollama Cloud API key (get one at <span class="mono">ollama.com/settings/keys</span>) when prompted — Goose stores it itself, AgenticIAM never sees or stores it. If Goose names the configured provider something other than <span class="mono">ollama_cloud</span>, substitute that name for <span class="mono">--provider ollama_cloud</span> below.</div>
+      <div class="err">One-time setup required before the command below will work: Ollama Cloud can't be selected via environment variables in Goose (its own provider code requires this). Run <span class="mono">goose configure</span>, choose <strong>Ollama Cloud</strong> from the provider list, and paste your API key (get one at <span class="mono">ollama.com/settings/keys</span>) when prompted — Goose stores it itself, AgenticIAM never sees or stores it.</div>
+      ` : ''}
+      ${r.ollama_cloud_auto_configured ? `
+      <p class="ok">Ollama Cloud auto-configured — no <span class="mono">goose configure</span> step needed. The API key was written to <span class="mono">${esc(r.ollama_cloud_secret_path)}</span> in plaintext (you chose this in step 2); the command below sets <span class="mono">GOOSE_DISABLE_KEYRING=1</span> so Goose reads it from there instead of your OS keyring, scoped to just this one command.</p>
+      ` : ''}
+      ${r.ollama_cloud_secret_error ? `
+      <div class="err">Couldn't write the Ollama Cloud secret automatically: ${esc(r.ollama_cloud_secret_error)}. Falling back to the manual <span class="mono">goose configure</span> step below.</div>
       ` : ''}
       <label>Run this to start chatting with your agent — pick the line for your terminal:</label>
       ${renderCommandShells(r.launch_commands, 'launch')}
@@ -660,9 +678,11 @@ async function renderSetup() {
           <span class="mono">ollama.com/settings/keys</span>, then pick "Ollama Cloud" as the provider in the New Agent
           wizard. One caveat depending on target:</p>
         <p class="hint"><strong>Goose:</strong> requires a one-time <span class="mono">goose configure</span> step
-          (choose "Ollama Cloud" from the provider list, or "Add a Custom Provider" with base URL
-          <span class="mono">https://ollama.com/v1</span>) before the wizard's launch command will work — Goose's own
-          provider code doesn't support configuring it via environment variables, unlike every other provider here.</p>
+          (choose "Ollama Cloud" from the provider list — it's built into Goose already) before the wizard's launch
+          command will work — Goose's own provider code doesn't support configuring it via environment variables,
+          unlike every other provider here. The wizard also offers an opt-in "auto-configure" checkbox that skips
+          this step entirely by writing the key to Goose's secrets.yaml in plaintext instead — off by default, your
+          choice.</p>
         <p class="hint"><strong>OpenClaw:</strong> fully scriptable — the wizard generates an extra
           <span class="mono">openclaw config set models.providers...</span> command that registers it, no manual step
           needed.</p>

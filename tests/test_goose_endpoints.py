@@ -382,6 +382,82 @@ def test_create_goose_agent_ollama_cloud_set_as_default_is_silently_skipped(
     assert "GOOSE_PROVIDER" not in written
 
 
+def test_create_goose_agent_ollama_cloud_auto_configure_writes_secret_and_flips_env(
+    client, admin_headers, goose_config_path
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "cloud-bot", "permissions": [], "provider": "ollama_cloud",
+            "model": "gpt-oss:120b-cloud", "api_key": "sk-fake-cloud-key",
+            "auto_configure_ollama_cloud": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert body["goose_configure_required"] is False
+    assert body["ollama_cloud_auto_configured"] is True
+    secret_path = body["ollama_cloud_secret_path"]
+    assert secret_path is not None
+
+    secrets = goose.load_secrets()
+    assert secrets[goose.OLLAMA_CLOUD_API_KEY_ENV] == "sk-fake-cloud-key"
+
+    commands = body["launch_commands"]
+    assert "GOOSE_DISABLE_KEYRING=1" in commands["bash"]
+    # the key itself is never echoed into the command — it's already on disk
+    assert "sk-fake-cloud-key" not in commands["bash"]
+
+
+def test_create_goose_agent_ollama_cloud_auto_configure_requires_api_key(
+    client, admin_headers, goose_config_path
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "cloud-bot", "permissions": [], "provider": "ollama_cloud",
+            "model": "gpt-oss:120b-cloud", "auto_configure_ollama_cloud": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_create_goose_agent_auto_configure_ignored_for_non_ollama_cloud_provider(
+    client, admin_headers, goose_config_path
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "regular-bot", "permissions": [], "provider": "ollama",
+            "model": "llama3.1:8b", "auto_configure_ollama_cloud": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert body["ollama_cloud_auto_configured"] is False
+    assert body["ollama_cloud_secret_path"] is None
+    assert not goose.secrets_path().exists()
+
+
+def test_create_openclaw_agent_auto_configure_field_is_a_no_op(
+    client, admin_headers, goose_config_path, openclaw_workspace_root
+):
+    # auto_configure_ollama_cloud only means something for the goose target
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "cloud-bot", "target": "openclaw", "permissions": [], "provider": "ollama_cloud",
+            "model": "gpt-oss:120b-cloud", "api_key": "sk-fake", "auto_configure_ollama_cloud": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    assert "ollama_cloud_auto_configured" not in resp.get_json()
+
+
 def test_create_openclaw_agent_ollama_cloud_includes_provider_registration_command(
     client, admin_headers, goose_config_path, openclaw_workspace_root
 ):
