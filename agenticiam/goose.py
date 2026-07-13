@@ -756,5 +756,15 @@ def run_agent_task(
             detail += f"\nstdout so far:\n{partial_out[-2000:]}"
         raise DispatchError(f"dispatched task timed out after {timeout}s{detail}") from exc
     if result.returncode != 0:
-        raise DispatchError(result.stderr.strip() or f"goose run exited with status {result.returncode}")
+        raise DispatchError((result.stderr or "").strip() or f"goose run exited with status {result.returncode}")
+    if result.stdout is None:
+        # subprocess.run(capture_output=True, text=True) is documented to always
+        # give back a str for stdout — but this exact site has been reported in
+        # the field (Windows, goose_binary resolved via find_goose_binary()) as
+        # 'NoneType' object has no attribute 'strip'. Surface it as a clear
+        # DispatchError instead of an unhandled AttributeError so a recurrence
+        # is diagnosable rather than a bare crash.
+        raise DispatchError(
+            f"goose run exited 0 but produced no captured stdout (binary={binary!r}, provider={provider!r}, model={model!r})"
+        )
     return result.stdout.strip()

@@ -514,6 +514,29 @@ def test_run_agent_task_nonzero_exit_raises(monkeypatch):
         goose.run_agent_task("ollama", "nope", "task")
 
 
+def test_run_agent_task_none_stdout_raises_dispatch_error_instead_of_crashing(monkeypatch):
+    # subprocess.run(capture_output=True, text=True) is documented to always
+    # return a str for stdout, but this has been reported in the field as an
+    # unhandled AttributeError ('NoneType' object has no attribute 'strip').
+    # Whatever the platform-specific cause, a None stdout must surface as a
+    # clear DispatchError, never an unhandled crash.
+    monkeypatch.setattr(
+        goose.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=None, stderr=""),
+    )
+    with pytest.raises(goose.DispatchError, match="no captured stdout"):
+        goose.run_agent_task("ollama", "llama3.1:8b", "task")
+
+
+def test_run_agent_task_none_stderr_on_nonzero_exit_raises_dispatch_error(monkeypatch):
+    monkeypatch.setattr(
+        goose.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout="", stderr=None),
+    )
+    with pytest.raises(goose.DispatchError, match="exited with status 1"):
+        goose.run_agent_task("ollama", "llama3.1:8b", "task")
+
+
 def test_run_agent_task_missing_binary_raises(monkeypatch):
     def fake_run(*a, **k):
         raise FileNotFoundError()
