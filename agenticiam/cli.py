@@ -168,7 +168,7 @@ def agent_rotate_secret(name):
 @click.argument("task")
 @click.option("--timeout", default=None, type=float, help="Seconds to wait (default 300, matches the extension's own MCP timeout).")
 def agent_dispatch(name, task, timeout):
-    """Run a one-shot task through a Goose-linked agent (must be Ollama-backed; see the New Agent wizard docs)."""
+    """Run a one-shot task through a Goose-linked agent (must be Ollama or Ollama Cloud-backed; see the New Agent wizard docs)."""
     d = _directory()
     try:
         target = d.get_identity(name)
@@ -177,12 +177,13 @@ def agent_dispatch(name, task, timeout):
     goose_meta = (target.get("metadata") or {}).get("goose")
     if not goose_meta:
         raise click.ClickException(f"{name!r} was not created as a Goose agent (no provider/model metadata)")
-    if goose_meta.get("provider") != "ollama":
-        raise click.ClickException(
-            "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
-            "API keys for cloud providers"
-        )
     from . import goose as goose_module
+
+    if goose_meta.get("provider") not in goose_module.DISPATCHABLE_PROVIDERS:
+        raise click.ClickException(
+            "dispatch currently only supports Ollama and Ollama Cloud workers — AgenticIAM never "
+            "stores API keys for Anthropic/Google"
+        )
 
     effective_timeout = timeout or goose_module.DEFAULT_DISPATCH_TIMEOUT
     audit_module.log(
@@ -191,7 +192,10 @@ def agent_dispatch(name, task, timeout):
     )
     started = time.monotonic()
     try:
-        result = goose_module.run_agent_task(goose_meta["provider"], goose_meta["model"], task, timeout=effective_timeout)
+        result = goose_module.run_agent_task(
+            goose_meta["provider"], goose_meta["model"], task, timeout=effective_timeout,
+            disable_keyring=bool(goose_meta.get("ollama_cloud_auto_configured")),
+        )
     except goose_module.DispatchError as exc:
         audit_module.log(
             d.conn, f"dispatch.{name}", "failure", actor_name="cli",

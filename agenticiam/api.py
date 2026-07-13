@@ -277,14 +277,14 @@ def create_app(db_path=None) -> Flask:
                 ),
                 400,
             )
-        if goose_meta.get("provider") != "ollama":
+        if goose_meta.get("provider") not in goose.DISPATCHABLE_PROVIDERS:
             return (
                 jsonify(
                     {
                         "error": "unsupported",
                         "error_description": (
-                            "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
-                            "API keys for cloud providers, so there's nothing to dispatch a cloud-backed agent with"
+                            "dispatch currently only supports Ollama and Ollama Cloud workers — AgenticIAM never "
+                            "stores API keys for Anthropic/Google, so there's nothing to dispatch a call with for those"
                         ),
                     }
                 ),
@@ -304,7 +304,10 @@ def create_app(db_path=None) -> Flask:
         )
         started = time.monotonic()
         try:
-            response_text = goose.run_agent_task(goose_meta["provider"], goose_meta["model"], task, timeout=timeout)
+            response_text = goose.run_agent_task(
+                goose_meta["provider"], goose_meta["model"], task, timeout=timeout,
+                disable_keyring=bool(goose_meta.get("ollama_cloud_auto_configured")),
+            )
         except goose.DispatchError as exc:
             audit.log(
                 directory.conn, f"dispatch.{name}", "failure",
@@ -765,6 +768,30 @@ def create_app(db_path=None) -> Flask:
                 else:
                     soul_error = str(exc)
 
+        # Opt-in only: writes the Ollama Cloud API key in *plaintext* to
+        # Goose's secrets.yaml, unlike every other provider here where the
+        # key is never persisted anywhere. Meaningless for other providers
+        # or the OpenClaw target, so it's silently ignored there. Computed
+        # (and the secret written) before create_identity below so
+        # ollama_cloud_auto_configured can be recorded in metadata —
+        # iam_dispatch_to_agent needs it later to know whether a dispatch
+        # subprocess must set GOOSE_DISABLE_KEYRING=1 to find this secret.
+        env_unconfigurable = provider in goose.GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
+        auto_configure = target == "goose" and bool(data.get("auto_configure_ollama_cloud")) and env_unconfigurable
+        secret_path = None
+        secret_error = None
+        if auto_configure:
+            if not api_key:
+                return jsonify({
+                    "error": "invalid_request",
+                    "error_description": "api_key is required to auto-configure Ollama Cloud",
+                }), 400
+            try:
+                secret_path = goose.write_ollama_cloud_secret(api_key)
+            except OSError as exc:
+                secret_error = str(exc)
+                auto_configure = False
+
         directory = get_directory()
         actor = _actor()
         role_name = f"{name}-role"
@@ -782,6 +809,7 @@ def create_app(db_path=None) -> Flask:
                         "provider": provider, "model": model, "context_limit": context_limit,
                         "is_manager": is_manager,
                         "manager_recipe_path": str(recipe_path) if recipe_path else None,
+                        "ollama_cloud_auto_configured": auto_configure,
                     },
                     "target": target,
                     "openclaw": {"manager_soul_path": str(soul_path) if soul_path else None} if target == "openclaw" else None,
@@ -813,27 +841,7 @@ def create_app(db_path=None) -> Flask:
             "is_manager": is_manager,
         }
 
-        env_unconfigurable = provider in goose.GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
         if target == "goose":
-            # Opt-in only: writes the Ollama Cloud API key in *plaintext* to
-            # Goose's secrets.yaml, unlike every other provider here where the
-            # key is never persisted anywhere. Meaningless for other providers
-            # or the OpenClaw target, so it's silently ignored there.
-            auto_configure = bool(data.get("auto_configure_ollama_cloud")) and env_unconfigurable
-            secret_path = None
-            secret_error = None
-            if auto_configure:
-                if not api_key:
-                    return jsonify({
-                        "error": "invalid_request",
-                        "error_description": "api_key is required to auto-configure Ollama Cloud",
-                    }), 400
-                try:
-                    secret_path = goose.write_ollama_cloud_secret(api_key)
-                except OSError as exc:
-                    secret_error = str(exc)
-                    auto_configure = False
-
             result["goose_configure_required"] = env_unconfigurable and not auto_configure
             result["ollama_cloud_auto_configured"] = auto_configure
             result["ollama_cloud_secret_path"] = str(secret_path) if secret_path else None

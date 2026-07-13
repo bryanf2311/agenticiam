@@ -125,19 +125,21 @@ def h_audit_log(directory, principal, args):
 
 def h_dispatch_to_agent(directory, principal, args):
     """"Manager delegates a task to a worker" — requires dispatch:<agent>
-    (or dispatch:*), only works against Ollama-backed workers since
-    AgenticIAM never stores provider API keys to reconstruct a dispatch
-    call for anything that needs one (see goose.run_agent_task)."""
+    (or dispatch:*), only works against workers in goose.DISPATCHABLE_PROVIDERS
+    (Ollama and Ollama Cloud) since AgenticIAM never stores an
+    Anthropic/Google API key to reconstruct a dispatch call for anything
+    that needs one (see goose.run_agent_task)."""
     agent_name = args["agent"]
     _require_permission(principal, f"dispatch:{agent_name}")
     target = directory.get_identity(agent_name)
     goose_meta = (target.get("metadata") or {}).get("goose")
     if not goose_meta:
         raise ValueError(f"{agent_name!r} was not created as a Goose agent (no provider/model metadata)")
-    if goose_meta.get("provider") != "ollama":
+    provider = goose_meta.get("provider")
+    if provider not in goose.DISPATCHABLE_PROVIDERS:
         raise ValueError(
-            "dispatch currently only supports Ollama-backed workers — AgenticIAM never stores "
-            "API keys for cloud providers, so there's nothing to dispatch a cloud-backed agent with"
+            "dispatch currently only supports Ollama and Ollama Cloud workers — AgenticIAM never "
+            "stores API keys for Anthropic/Google, so there's nothing to dispatch a call with for those"
         )
     timeout = args.get("timeout_seconds") or goose.DEFAULT_DISPATCH_TIMEOUT
     audit.log(
@@ -148,7 +150,8 @@ def h_dispatch_to_agent(directory, principal, args):
     started = time.monotonic()
     try:
         response_text = goose.run_agent_task(
-            goose_meta["provider"], goose_meta["model"], args["task"], timeout=timeout
+            goose_meta["provider"], goose_meta["model"], args["task"], timeout=timeout,
+            disable_keyring=bool(goose_meta.get("ollama_cloud_auto_configured")),
         )
     except goose.DispatchError as exc:
         audit.log(

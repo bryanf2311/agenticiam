@@ -427,7 +427,7 @@ async function renderWizardStep3() {
   // shown; only the per-agent target list needs existingAgents.
   const managerSection = `
     <h3 style="margin-top:26px">Manager permissions (optional)</h3>
-    <p class="hint">Let "${esc(wizardState.name)}" delegate tasks to other agents and get their response back — a "manager" dispatching to "workers". Dispatch only works against Ollama-backed agents (AgenticIAM never stores the API keys cloud providers would need). Checking any box here preloads "${esc(wizardState.name)}" with a system prompt explaining how to call the dispatch tool correctly (via a Goose recipe file) — no need to paste it in yourself.</p>
+    <p class="hint">Let "${esc(wizardState.name)}" delegate tasks to other agents and get their response back — a "manager" dispatching to "workers". Dispatch works against Ollama and Ollama Cloud agents (AgenticIAM never stores the Anthropic/Google API keys those providers would need). Checking any box here preloads "${esc(wizardState.name)}" with a system prompt explaining how to call the dispatch tool correctly (via a Goose recipe file) — no need to paste it in yourself.</p>
     <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
       <input type="checkbox" id="wiz-dispatch-wildcard" ${wizardState.dispatchWildcard ? 'checked' : ''} style="width:auto">
       <span>Can dispatch to <strong>any</strong> agent, including ones created later (<span class="mono">dispatch:*</span>)</span>

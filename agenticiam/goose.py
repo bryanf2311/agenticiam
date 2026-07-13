@@ -42,6 +42,14 @@ GOOGLE_API_BASE = "https://generativelanguage.googleapis.com"
 # configure` step before any generated launch command will work.
 GOOSE_ENV_UNCONFIGURABLE_PROVIDERS = {"ollama_cloud"}
 
+# Providers dispatch can reach: AgenticIAM never stores an Anthropic/Google
+# API key, so there's nothing to reconstruct a dispatch call with for
+# those. Ollama and Ollama Cloud are different — Goose resolves those keys
+# itself (none needed at all for local Ollama; Ollama Cloud's key lives in
+# Goose's own keyring/secrets.yaml, set up via `goose configure` or the
+# wizard's auto-configure option, never by AgenticIAM). See run_agent_task.
+DISPATCHABLE_PROVIDERS = {"ollama", "ollama_cloud"}
+
 # Confirmed against block/goose's actual provider source (anthropic_def.rs,
 # google_def.rs) and its provider docs table — not guessed. Note Gemini's
 # env var is GOOGLE_API_KEY, not GEMINI_API_KEY, despite the product name.
@@ -285,10 +293,13 @@ delegated work yourself.
 
 ## Before You Dispatch Anything
 
-**Dispatch only works against Ollama-backed agents.** AgenticIAM never
-stores Anthropic/Google API keys (by design — it's not a place third-party
-provider credentials should live), so there is nothing to reconstruct a
-dispatch call with for a cloud-backed agent. If you try to dispatch to one,
+**Dispatch only works against Ollama and Ollama Cloud agents.** AgenticIAM
+never stores Anthropic/Google API keys (by design — it's not a place
+third-party provider credentials should live), so there is nothing to
+reconstruct a dispatch call with for those. Ollama and Ollama Cloud are
+different: Goose resolves those keys itself (none needed at all for local
+Ollama; Ollama Cloud's key lives in Goose's own keyring/secrets.yaml, not
+AgenticIAM's). If you try to dispatch to an Anthropic/Google-backed agent,
 you'll get a clear error, not a hang.
 
 Check who's actually dispatchable before you try, in the same call where
@@ -302,7 +313,8 @@ async function run() {
   const agents = await Boss.iamListIdentities({ kind: "agent" });
   const dispatchable = agents.filter(a =>
     a.name !== me.name &&
-    a.metadata && a.metadata.goose && a.metadata.goose.provider === "ollama"
+    a.metadata && a.metadata.goose &&
+    ["ollama", "ollama_cloud"].includes(a.metadata.goose.provider)
   );
 
   return {
@@ -406,10 +418,11 @@ metadata)`** — that identity exists in AgenticIAM but wasn't created
 through the New Agent wizard (or was created before that metadata
 existed). It can't be dispatched to; recreate it through the wizard.
 
-**`dispatch currently only supports Ollama-backed workers`** — the target
-is Anthropic/Google-backed. Dispatch cannot reach it (see "Before You
-Dispatch Anything" above). Use an Ollama-backed worker instead, or run
-that specific task yourself if it genuinely needs the bigger model.
+**`dispatch currently only supports Ollama and Ollama Cloud workers`** —
+the target is Anthropic/Google-backed. Dispatch cannot reach it (see
+"Before You Dispatch Anything" above). Use an Ollama or Ollama
+Cloud-backed worker instead, or run that specific task yourself if it
+genuinely needs a different model.
 
 **`dispatched task timed out after <N>s`** (may include partial
 stdout/stderr) — the worker didn't finish in time. Default is 300s. Retry
@@ -427,7 +440,7 @@ async function run() {
   const me = await Boss.iamWhoami();
   const agents = await Boss.iamListIdentities({ kind: "agent" });
   const workers = agents.filter(a =>
-    a.name !== me.name && a.metadata?.goose?.provider === "ollama"
+    a.name !== me.name && ["ollama", "ollama_cloud"].includes(a.metadata?.goose?.provider)
   );
   console.log(`Manager: ${me.name}. Dispatchable workers: ${workers.map(w => w.name).join(', ')}`);
 
@@ -667,7 +680,12 @@ DEFAULT_DISPATCH_TIMEOUT = 300.0  # matches the "timeout" field register_extensi
 
 
 def run_agent_task(
-    provider: str, model: str, task: str, timeout: float = DEFAULT_DISPATCH_TIMEOUT, goose_binary: str = None
+    provider: str,
+    model: str,
+    task: str,
+    timeout: float = DEFAULT_DISPATCH_TIMEOUT,
+    goose_binary: str = None,
+    disable_keyring: bool = False,
 ) -> str:
     """Runs a single non-interactive task through Goose as a given
     provider/model and returns its text response — this is the "manager
@@ -679,13 +697,25 @@ def run_agent_task(
     launch_commands's docstring for the same lesson). `--no-session`
     keeps it a one-shot call with no persisted session state to manage.
 
-    This only ever runs against providers that need no API key (in
-    practice, Ollama) — AgenticIAM never stores provider API keys (see
-    launch_commands), so there is nowhere to pull an Anthropic/Google key
-    back out of for a dispatch call the manager didn't just type in.
-    Callers are expected to enforce that restriction before calling this;
-    it isn't re-checked here since this function has no notion of "worker
-    identity", just provider/model/task.
+    Providers whose key AgenticIAM never stores (Anthropic, Google) can't
+    be dispatched to — there's nowhere to pull the key back out of for a
+    call the manager didn't just type in. Ollama and Ollama Cloud are
+    different: Goose resolves those keys itself (no key needed at all for
+    local Ollama; Ollama Cloud's key lives in Goose's own keyring or
+    secrets.yaml, not AgenticIAM's). Callers are expected to enforce which
+    providers are dispatchable before calling this; it isn't re-checked
+    here since this function has no notion of "worker identity", just
+    provider/model/task.
+
+    `disable_keyring`, when true, sets GOOSE_DISABLE_KEYRING=1 for this
+    one subprocess only (never touches the parent AgenticIAM process's own
+    environment or Goose's config.yaml) — needed when the target identity
+    was set up via the wizard's "auto-configure" checkbox, which writes
+    the Ollama Cloud key to secrets.yaml rather than the OS keyring (see
+    write_ollama_cloud_secret). Leave false for a worker configured the
+    normal way via `goose configure` (OS keyring) — forcing keyring off
+    there would make Goose look in secrets.yaml instead and fail to find
+    a key that was never written there.
 
     The default timeout matches the extension's own configured MCP
     timeout (see register_extension) — dispatching used to time out
@@ -698,6 +728,8 @@ def run_agent_task(
     binary = goose_binary or find_goose_binary() or "goose"
     cmd = [binary, "run", "--no-session", "--provider", provider, "--model", model, "-t", task]
     popen_kwargs = {}
+    if disable_keyring:
+        popen_kwargs["env"] = {**os.environ, "GOOSE_DISABLE_KEYRING": "1"}
     if os.name == "nt":
         # Without this, Windows pops up a new, empty console window for the
         # child process — the parent (agenticiam-gui.exe, or any MCP stdio

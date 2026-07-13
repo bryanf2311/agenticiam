@@ -409,6 +409,11 @@ def test_create_goose_agent_ollama_cloud_auto_configure_writes_secret_and_flips_
     # the key itself is never echoed into the command — it's already on disk
     assert "sk-fake-cloud-key" not in commands["bash"]
 
+    # persisted on the identity so iam_dispatch_to_agent can find it later
+    # and know to set GOOSE_DISABLE_KEYRING=1 for its own subprocess call
+    identity = client.get("/v1/admin/identities/cloud-bot", headers=admin_headers).get_json()
+    assert identity["metadata"]["goose"]["ollama_cloud_auto_configured"] is True
+
 
 def test_create_goose_agent_ollama_cloud_auto_configure_requires_api_key(
     client, admin_headers, goose_config_path
@@ -770,6 +775,46 @@ def test_dispatch_non_ollama_provider_rejected(client, directory, manager_token)
     assert "only supports Ollama" in resp.get_json()["error_description"]
 
 
+def test_dispatch_ollama_cloud_provider_is_accepted(client, directory, manager_token, monkeypatch):
+    monkeypatch.setattr(goose, "run_agent_task", lambda provider, model, task, **kw: "ok")
+    directory.create_identity(
+        "agent", "cloud-worker", metadata={"goose": {"provider": "ollama_cloud", "model": "gpt-oss:120b-cloud"}}
+    )
+    token = tokens.issue_access_token(directory.get_identity("manager1"), ["dispatch:cloud-worker"])
+    resp = client.post(
+        "/v1/agents/cloud-worker/dispatch", json={"task": "hi"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"agent": "cloud-worker", "response": "ok"}
+
+
+def test_dispatch_ollama_cloud_auto_configured_passes_disable_keyring(client, directory, manager_token, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        goose, "run_agent_task",
+        lambda provider, model, task, disable_keyring=False, **kw: captured.setdefault("disable_keyring", disable_keyring) or "ok",
+    )
+    directory.create_identity(
+        "agent", "cloud-worker",
+        metadata={"goose": {"provider": "ollama_cloud", "model": "gpt-oss:120b-cloud", "ollama_cloud_auto_configured": True}},
+    )
+    token = tokens.issue_access_token(directory.get_identity("manager1"), ["dispatch:cloud-worker"])
+    client.post("/v1/agents/cloud-worker/dispatch", json={"task": "hi"}, headers={"Authorization": f"Bearer {token}"})
+    assert captured["disable_keyring"] is True
+
+
+def test_dispatch_still_rejects_anthropic_and_google(client, directory, manager_token):
+    directory.create_identity(
+        "agent", "google-worker", metadata={"goose": {"provider": "google", "model": "gemini-3-flash"}}
+    )
+    token = tokens.issue_access_token(directory.get_identity("manager1"), ["dispatch:google-worker"])
+    resp = client.post(
+        "/v1/agents/google-worker/dispatch", json={"task": "hi"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 400
+    assert "Ollama and Ollama Cloud" in resp.get_json()["error_description"]
+
+
 def test_dispatch_missing_task(client, manager_token, ollama_worker):
     resp = client.post(
         f"/v1/agents/{ollama_worker['name']}/dispatch", json={}, headers={"Authorization": f"Bearer {manager_token}"}
@@ -804,7 +849,7 @@ def test_dispatch_writes_started_audit_entry_with_timeout(client, manager_token,
 def test_dispatch_passes_custom_timeout_to_run_agent_task(client, manager_token, ollama_worker, monkeypatch):
     captured = {}
 
-    def fake_run(provider, model, task, timeout=None):
+    def fake_run(provider, model, task, timeout=None, disable_keyring=False):
         captured["timeout"] = timeout
         return "ok"
 
@@ -820,7 +865,7 @@ def test_dispatch_passes_custom_timeout_to_run_agent_task(client, manager_token,
 def test_dispatch_defaults_to_300s(client, manager_token, ollama_worker, monkeypatch):
     captured = {}
 
-    def fake_run(provider, model, task, timeout=None):
+    def fake_run(provider, model, task, timeout=None, disable_keyring=False):
         captured["timeout"] = timeout
         return "ok"
 

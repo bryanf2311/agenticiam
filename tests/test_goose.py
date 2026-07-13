@@ -469,6 +469,42 @@ def test_run_agent_task_no_window_suppression_kwarg_on_posix(monkeypatch):
     assert captured["kwargs"] == {}
 
 
+def test_run_agent_task_disable_keyring_sets_scoped_env_var(monkeypatch):
+    # doesn't mutate the real os.environ (a prior lesson in this project:
+    # mutating global process state like os.name mid-suite caused a real
+    # pytest crash) — just checks the env kwarg passed to subprocess.run
+    # is a merge of the real environment plus the one new key.
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeCompletedProcess(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    goose.run_agent_task("ollama_cloud", "gpt-oss:120b-cloud", "task", goose_binary="goose", disable_keyring=True)
+    passed_env = captured["kwargs"]["env"]
+    assert passed_env["GOOSE_DISABLE_KEYRING"] == "1"
+    assert passed_env["PATH"] == goose.os.environ["PATH"]  # the real environment is still there, not replaced
+    # the parent AgenticIAM process's own environment is never mutated
+    assert "GOOSE_DISABLE_KEYRING" not in goose.os.environ
+
+
+def test_run_agent_task_disable_keyring_false_omits_env_kwarg(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeCompletedProcess(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(goose.subprocess, "run", fake_run)
+    goose.run_agent_task("ollama", "llama3.1:8b", "task", goose_binary="goose", disable_keyring=False)
+    assert "env" not in captured["kwargs"]
+
+
+def test_dispatchable_providers_includes_ollama_and_ollama_cloud_only():
+    assert goose.DISPATCHABLE_PROVIDERS == {"ollama", "ollama_cloud"}
+
+
 def test_run_agent_task_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(
         goose.subprocess, "run",

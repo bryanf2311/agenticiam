@@ -139,6 +139,56 @@ def test_dispatch_non_ollama_provider_raises_value_error(directory):
         mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "cloud-worker", "task": "hi"})
 
 
+def test_dispatch_ollama_cloud_provider_is_allowed(directory, monkeypatch):
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", lambda provider, model, task, **kw: f"did: {task}")
+    directory.create_identity(
+        "agent", "cloud-worker", metadata={"goose": {"provider": "ollama_cloud", "model": "gpt-oss:120b-cloud"}}
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:cloud-worker"])
+    result = mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "cloud-worker", "task": "summarize"})
+    assert result == {"agent": "cloud-worker", "response": "did: summarize"}
+
+
+def test_dispatch_ollama_cloud_auto_configured_sets_disable_keyring(directory, monkeypatch):
+    captured = {}
+
+    def fake_run(provider, model, task, timeout=None, disable_keyring=False):
+        captured["disable_keyring"] = disable_keyring
+        return "ok"
+
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", fake_run)
+    directory.create_identity(
+        "agent", "cloud-worker",
+        metadata={"goose": {"provider": "ollama_cloud", "model": "gpt-oss:120b-cloud", "ollama_cloud_auto_configured": True}},
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:cloud-worker"])
+    mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "cloud-worker", "task": "hi"})
+    assert captured["disable_keyring"] is True
+
+
+def test_dispatch_ollama_cloud_manually_configured_leaves_keyring_enabled(directory, monkeypatch):
+    # a worker configured via the normal `goose configure` (OS keyring) path
+    # has no ollama_cloud_auto_configured flag — dispatch must not force
+    # GOOSE_DISABLE_KEYRING=1 there, or Goose would look in secrets.yaml
+    # instead and fail to find a key that was never written there.
+    captured = {}
+
+    def fake_run(provider, model, task, timeout=None, disable_keyring=False):
+        captured["disable_keyring"] = disable_keyring
+        return "ok"
+
+    monkeypatch.setattr(mcp_server.goose, "run_agent_task", fake_run)
+    directory.create_identity(
+        "agent", "cloud-worker", metadata={"goose": {"provider": "ollama_cloud", "model": "gpt-oss:120b-cloud"}}
+    )
+    manager = directory.create_identity("agent", "manager1")
+    principal = _principal(manager, ["dispatch:cloud-worker"])
+    mcp_server.h_dispatch_to_agent(directory, principal, {"agent": "cloud-worker", "task": "hi"})
+    assert captured["disable_keyring"] is False
+
+
 def test_dispatch_success(directory, monkeypatch):
     monkeypatch.setattr(mcp_server.goose, "run_agent_task", lambda provider, model, task, **kw: f"did: {task}")
     directory.create_identity(
@@ -164,7 +214,7 @@ def test_dispatch_wildcard_permission_works(directory, monkeypatch):
 def test_dispatch_passes_custom_timeout(directory, monkeypatch):
     captured = {}
 
-    def fake_run(provider, model, task, timeout=None):
+    def fake_run(provider, model, task, timeout=None, disable_keyring=False):
         captured["timeout"] = timeout
         return "ok"
 
@@ -179,7 +229,7 @@ def test_dispatch_passes_custom_timeout(directory, monkeypatch):
 def test_dispatch_defaults_to_300s_timeout(directory, monkeypatch):
     captured = {}
 
-    def fake_run(provider, model, task, timeout=None):
+    def fake_run(provider, model, task, timeout=None, disable_keyring=False):
         captured["timeout"] = timeout
         return "ok"
 

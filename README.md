@@ -367,13 +367,17 @@ mechanism depends on target:
   [Goose recipe](https://block.github.io/goose/docs/guides/recipes/recipe-reference/)
   — a small YAML file whose `instructions` field is the full dispatch guide
   (how to call `iamDispatchToAgent` correctly, the `.response` field
-  gotcha, the Ollama-only restriction, troubleshooting) — to
-  `agenticiam-recipes/<name>.yaml` next to Goose's `config.yaml`. The
-  launch command the wizard hands you then uses `goose run --recipe
-  <path> --interactive -n <name>` instead of plain `goose session -n
-  <name>`, so opening that session starts the manager already knowing how
-  to dispatch. The recipe file is deleted automatically when you delete
-  the agent.
+  gotcha, which providers dispatch can reach, troubleshooting) — to
+  `agenticiam-recipes/<name>.yaml` next to Goose's `config.yaml`, along
+  with a `settings.goose_provider`/`goose_model` block so the recipe
+  actually launches with the model this agent was created with instead of
+  silently falling back to Goose's own global default (a real bug we hit:
+  a recipe with no settings block ignored the configured provider/model
+  entirely). The launch command the wizard hands you then uses `goose run
+  --recipe <path> --interactive -n <name>` instead of plain `goose
+  session -n <name>`, so opening that session starts the manager already
+  knowing how to dispatch. The recipe file is deleted automatically when
+  you delete the agent.
 - **OpenClaw**: the same content is written as `SOUL.md` into the agent's
   workspace (`~/.openclaw/workspace-<name>/SOUL.md`) — OpenClaw's own
   mechanism for a persona's system prompt.
@@ -397,15 +401,24 @@ not admin-gated, so a manager agent's own API key works) for non-MCP
 callers like OpenClaw, and from the terminal via `agenticiam agent
 dispatch <name> "<task>"`.
 
-**Dispatch only works against Ollama-backed workers.** This follows
-directly from AgenticIAM never storing provider API keys (see the wizard
-section above) — there's nowhere to pull an Anthropic/Google key back out
-of when a dispatch call comes in later, so cloud-backed agents cleanly
-error instead of silently failing or needing you to paste a key into
-every dispatch call. In practice this maps naturally onto the shape most
-people want anyway: cheap/fast local Ollama models as workers, a bigger
-cloud model (typically Claude, via Anthropic — but nothing enforces
-that) as the manager calling `dispatch` from its own session.
+**Dispatch works against Ollama and Ollama Cloud workers — not
+Anthropic/Google.** AgenticIAM never stores an Anthropic/Google API key
+(see the wizard section above), so there's nowhere to pull one back out
+of when a dispatch call comes in later; those cleanly error instead of
+silently failing or needing you to paste a key into every dispatch call.
+Ollama and Ollama Cloud are different: Goose resolves those keys itself
+(none needed at all for local Ollama; Ollama Cloud's key lives in Goose's
+own keyring/secrets.yaml, set up via `goose configure` or the wizard's
+auto-configure option — see "One thing worth knowing about Ollama
+Cloud" — never by AgenticIAM). Dispatch's own subprocess call sets
+`GOOSE_DISABLE_KEYRING=1` automatically (scoped to just that call) when
+the target worker was set up via auto-configure, so it can find the key
+in secrets.yaml the same way its own launch command would; a
+manually-`goose configure`d worker needs nothing extra. In practice this
+maps naturally onto the shape most people want anyway: cheap/fast local
+Ollama models as workers, a bigger cloud model (typically Claude, via
+Anthropic, or a bigger Ollama Cloud model — but nothing enforces that) as
+the manager calling `dispatch` from its own session.
 
 `goose run` (unlike `session`) genuinely accepts `--provider`/`--model`
 flags — confirmed against the CLI docs and consistent with everything
@@ -536,7 +549,7 @@ agenticiam whoami --token TOKEN          resolve a token to an identity + scopes
 
 agenticiam user add|list                 human identities
 agenticiam agent add|list|rotate-secret  AI agent / service identities
-agenticiam agent dispatch NAME TASK      run a task through a Goose-linked (Ollama-backed) agent
+agenticiam agent dispatch NAME TASK      run a task through a Goose-linked (Ollama/Ollama Cloud) agent
 agenticiam identity show|enable|disable|rm|permissions NAME
 
 agenticiam group add|list|add-member|remove-member|members

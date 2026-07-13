@@ -15,10 +15,13 @@ delegated work yourself.
 
 ## Before You Dispatch Anything
 
-**Dispatch only works against Ollama-backed agents.** AgenticIAM never
-stores Anthropic/Google API keys (by design — it's not a place third-party
-provider credentials should live), so there is nothing to reconstruct a
-dispatch call with for a cloud-backed agent. If you try to dispatch to one,
+**Dispatch only works against Ollama and Ollama Cloud agents.** AgenticIAM
+never stores Anthropic/Google API keys (by design — it's not a place
+third-party provider credentials should live), so there is nothing to
+reconstruct a dispatch call with for those. Ollama and Ollama Cloud are
+different: Goose resolves those keys itself (none needed at all for local
+Ollama; Ollama Cloud's key lives in Goose's own keyring/secrets.yaml, not
+AgenticIAM's). If you try to dispatch to an Anthropic/Google-backed agent,
 you'll get a clear error, not a hang.
 
 Check who's actually dispatchable before you try, in the same call where
@@ -32,7 +35,8 @@ async function run() {
   const agents = await Boss.iamListIdentities({ kind: "agent" });
   const dispatchable = agents.filter(a =>
     a.name !== me.name &&
-    a.metadata && a.metadata.goose && a.metadata.goose.provider === "ollama"
+    a.metadata && a.metadata.goose &&
+    ["ollama", "ollama_cloud"].includes(a.metadata.goose.provider)
   );
 
   return {
@@ -136,10 +140,11 @@ metadata)`** — that identity exists in AgenticIAM but wasn't created
 through the New Agent wizard (or was created before that metadata
 existed). It can't be dispatched to; recreate it through the wizard.
 
-**`dispatch currently only supports Ollama-backed workers`** — the target
-is Anthropic/Google-backed. Dispatch cannot reach it (see "Before You
-Dispatch Anything" above). Use an Ollama-backed worker instead, or run
-that specific task yourself if it genuinely needs the bigger model.
+**`dispatch currently only supports Ollama and Ollama Cloud workers`** —
+the target is Anthropic/Google-backed. Dispatch cannot reach it (see
+"Before You Dispatch Anything" above). Use an Ollama or Ollama
+Cloud-backed worker instead, or run that specific task yourself if it
+genuinely needs a different model.
 
 **`dispatched task timed out after <N>s`** (may include partial
 stdout/stderr) — the worker didn't finish in time. Default is 300s. Retry
@@ -157,7 +162,7 @@ async function run() {
   const me = await Boss.iamWhoami();
   const agents = await Boss.iamListIdentities({ kind: "agent" });
   const workers = agents.filter(a =>
-    a.name !== me.name && a.metadata?.goose?.provider === "ollama"
+    a.name !== me.name && ["ollama", "ollama_cloud"].includes(a.metadata?.goose?.provider)
   );
   console.log(`Manager: ${me.name}. Dispatchable workers: ${workers.map(w => w.name).join(', ')}`);
 
