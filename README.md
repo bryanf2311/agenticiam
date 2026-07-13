@@ -573,6 +573,16 @@ edit each one's real permissions in place:
 If `openclaw` isn't installed, or the gateway isn't reachable, the tab
 says so and points at the Setup tab instead of failing silently.
 
+One quirk worth knowing about: on at least one real openclaw build, the
+CLI process doesn't reliably exit on its own once it's done its work
+(seen as `openclaw agents list --json` "timing out" even though it had
+already printed a complete, correct JSON array well within the timeout —
+something's keeping its Node process alive after the actual command is
+finished). AgenticIAM works around this rather than surfacing a false
+failure: reads recover a complete result straight out of the timeout if
+one was produced; writes that time out are verified with a follow-up
+read before being reported as failed.
+
 ## CLI reference
 
 ```

@@ -75,16 +75,45 @@ class OpenClawCliError(Exception):
     pass
 
 
+class OpenClawTimeoutError(OpenClawCliError):
+    """Raised specifically for a subprocess.TimeoutExpired, as opposed to a
+    real CLI error — callers doing a mutation (_set_agent_path,
+    set_website_allowlist) catch just this to attempt a read-back check
+    (see those functions' docstrings for why: a real field report showed
+    this exact openclaw build finishing its work and printing complete
+    output well within the timeout, but never exiting the process on its
+    own — see _run_openclaw's docstring)."""
+
+
 def find_openclaw_binary() -> str:
     return shutil.which("openclaw")
 
 
-def _run_openclaw(args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> str:
+def _run_openclaw(
+    args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT, recover_json_on_timeout: bool = False
+) -> str:
     """Runs an `openclaw` subcommand and returns its stdout as a string.
 
     Mirrors goose.run_agent_task's subprocess handling (same CREATE_NO_WINDOW
     reasoning on Windows, same defensive-against-None-stdout guard learned
     the hard way from a real field report against that function).
+
+    A second, distinct field report: `openclaw agents list --json` reported
+    as "timed out after 15.0s" even though the timeout's own partial-output
+    capture showed the CLI had already printed a complete, well-formed JSON
+    array — the work was done and correct well inside the timeout. The
+    process itself just never exited on its own (a lingering connection to
+    the gateway, going by the stray "[state-migrations]" warning in this
+    build, keeping its event loop alive past the point its actual job was
+    finished) — a real quirk of this specific openclaw build/version, not
+    something AgenticIAM's subprocess call is doing wrong. subprocess.run
+    can only tell a genuine hang from "done but won't exit" by whether
+    complete output was produced, so `recover_json_on_timeout` (used by
+    _run_openclaw_json, the read-only paths) parses whatever partial stdout
+    the timeout captured and treats successfully-parsed JSON as the real
+    result rather than a failure — see also OpenClawTimeoutError for the
+    read-back-and-verify fallback mutations use for the same underlying
+    issue.
     """
     binary = openclaw_binary or find_openclaw_binary() or "openclaw"
     cmd = [binary, *args]
@@ -106,19 +135,26 @@ def _run_openclaw(args: list, openclaw_binary: str = None, timeout: float = DEFA
     except subprocess.TimeoutExpired as exc:
         partial_out = (getattr(exc, "stdout", None) or "").strip()
         partial_err = (getattr(exc, "stderr", None) or "").strip()
+        if recover_json_on_timeout and partial_out:
+            try:
+                json.loads(partial_out)
+            except ValueError:
+                pass
+            else:
+                return partial_out
         detail = ""
         if partial_err:
             detail += f"\nstderr so far:\n{partial_err[-2000:]}"
         if partial_out:
             detail += f"\nstdout so far:\n{partial_out[-2000:]}"
-        raise OpenClawCliError(f"openclaw {' '.join(args)} timed out after {timeout}s{detail}") from exc
+        raise OpenClawTimeoutError(f"openclaw {' '.join(args)} timed out after {timeout}s{detail}") from exc
     if result.returncode != 0:
         raise OpenClawCliError((result.stderr or "").strip() or f"openclaw {' '.join(args)} exited with status {result.returncode}")
     return result.stdout or ""
 
 
 def _run_openclaw_json(args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT):
-    out = _run_openclaw(args, openclaw_binary=openclaw_binary, timeout=timeout).strip()
+    out = _run_openclaw(args, openclaw_binary=openclaw_binary, timeout=timeout, recover_json_on_timeout=True).strip()
     if not out:
         return None
     try:
@@ -155,14 +191,31 @@ def get_agent_config(agent_id: str, openclaw_binary: str = None, timeout: float 
     return data or {}
 
 
+def _config_set_verified(path: str, value, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:
+    """`config set <path> <value> --strict-json`, with a fallback for the
+    same "finished the write but the process wouldn't exit" behavior
+    _run_openclaw's recover_json_on_timeout works around for reads (see its
+    docstring) — except a `config set` prints no output to recover from, so
+    there's nothing to parse out of the timeout. Instead, on a timeout,
+    read the path straight back and compare: if the value's already there,
+    the write genuinely succeeded despite the CLI call looking like a
+    failure; if not, it's a real timeout and the error is re-raised."""
+    try:
+        _run_openclaw(
+            ["config", "set", path, json.dumps(value), "--strict-json"], openclaw_binary=openclaw_binary, timeout=timeout
+        )
+    except OpenClawTimeoutError:
+        current = _run_openclaw_json(["config", "get", path, "--json"], openclaw_binary=openclaw_binary, timeout=timeout)
+        if current != value:
+            raise
+
+
 def _set_agent_path(
     agent_id: str, path_suffix: str, value, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
 ) -> None:
     idx = _agent_index(agent_id, openclaw_binary=openclaw_binary, timeout=timeout)
     path = f"agents.list[{idx}].{path_suffix}"
-    _run_openclaw(
-        ["config", "set", path, json.dumps(value), "--strict-json"], openclaw_binary=openclaw_binary, timeout=timeout
-    )
+    _config_set_verified(path, value, openclaw_binary=openclaw_binary, timeout=timeout)
 
 
 def set_agent_tools(
@@ -219,9 +272,8 @@ def get_website_allowlist(openclaw_binary: str = None, timeout: float = DEFAULT_
 
 
 def set_website_allowlist(hostnames: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:
-    _run_openclaw(
-        ["config", "set", "browser.ssrfPolicy.hostnameAllowlist", json.dumps(hostnames), "--strict-json"],
-        openclaw_binary=openclaw_binary, timeout=timeout,
+    _config_set_verified(
+        "browser.ssrfPolicy.hostnameAllowlist", hostnames, openclaw_binary=openclaw_binary, timeout=timeout
     )
 
 

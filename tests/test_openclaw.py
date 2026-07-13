@@ -146,6 +146,86 @@ def test_run_openclaw_timeout_surfaces_partial_output(monkeypatch):
     assert "partial stderr" in str(exc_info.value)
 
 
+def test_run_openclaw_json_recovers_complete_output_from_a_timeout(monkeypatch):
+    # Real field report: `openclaw agents list --json` was reported "timed
+    # out after 15.0s" but the timeout's own partial-output capture showed
+    # a complete, well-formed JSON array — the CLI's work was done and
+    # correct, it just never exited the process on its own. Read-only
+    # calls (_run_openclaw_json) must treat that as success, not failure.
+    real_agents = [{"id": "main", "isDefault": True}, {"id": "autotask", "model": "ollama-cloud/deepseek-v4-pro"}]
+
+    def fake_run(*a, **k):
+        raise openclaw.subprocess.TimeoutExpired(
+            cmd="openclaw", timeout=15, output=json.dumps(real_agents), stderr="[state-migrations] ..."
+        )
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    result = openclaw._run_openclaw_json(["agents", "list", "--json"], openclaw_binary="openclaw", timeout=15)
+    assert result == real_agents
+
+
+def test_run_openclaw_json_timeout_with_incomplete_output_still_raises(monkeypatch):
+    # A genuine hang (no complete JSON yet) must still surface as an error
+    # rather than being swallowed by the recovery path above.
+    def fake_run(*a, **k):
+        raise openclaw.subprocess.TimeoutExpired(cmd="openclaw", timeout=15, output='[{"id": "main"', stderr="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    with pytest.raises(openclaw.OpenClawTimeoutError, match="timed out"):
+        openclaw._run_openclaw_json(["agents", "list", "--json"], openclaw_binary="openclaw", timeout=15)
+
+
+def test_list_agents_recovers_from_timeout_with_full_output(monkeypatch):
+    real_agents = [{"id": "main"}, {"id": "autotask"}]
+
+    def fake_run(*a, **k):
+        raise openclaw.subprocess.TimeoutExpired(cmd="openclaw", timeout=15, output=json.dumps(real_agents), stderr="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    assert openclaw.list_agents(openclaw_binary="openclaw", timeout=15) == real_agents
+
+
+def test_config_set_verified_succeeds_when_readback_matches_after_timeout(monkeypatch):
+    # config set prints no output to recover from directly — the fallback
+    # is a follow-up config get compared against the intended value.
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["config", "set"]:
+            raise openclaw.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        return _FakeCompletedProcess(returncode=0, stdout=json.dumps(["read", "write"]))
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw._config_set_verified("agents.list[0].tools.allow", ["read", "write"], openclaw_binary="openclaw")
+    assert len(calls) == 2
+    assert calls[0][1:3] == ["config", "set"]
+    assert calls[1][1:3] == ["config", "get"]
+
+
+def test_config_set_verified_raises_when_readback_does_not_match(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        if cmd[1:3] == ["config", "set"]:
+            raise openclaw.subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        return _FakeCompletedProcess(returncode=0, stdout=json.dumps(["something-else"]))
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    with pytest.raises(openclaw.OpenClawTimeoutError):
+        openclaw._config_set_verified("agents.list[0].tools.allow", ["read", "write"], openclaw_binary="openclaw")
+
+
+def test_config_set_verified_no_readback_needed_on_normal_success(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw._config_set_verified("agents.list[0].tools.allow", ["read"], openclaw_binary="openclaw")
+    assert len(calls) == 1
+
+
 def test_run_openclaw_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(
         openclaw.subprocess, "run",
