@@ -88,7 +88,15 @@ def _run_openclaw(args: list, openclaw_binary: str = None, timeout: float = DEFA
     """
     binary = openclaw_binary or find_openclaw_binary() or "openclaw"
     cmd = [binary, *args]
-    popen_kwargs = {}
+    # stdin=DEVNULL: a real field report showed `openclaw agents list --json`
+    # hanging until timeout with the gateway running. Left unset, a child
+    # process on some platforms inherits the parent's stdin; if the CLI ever
+    # falls back to an interactive prompt (wrong/unrecognized flag, a
+    # confirmation dialog, etc.) it would block reading from that instead of
+    # failing fast. Closing stdin up front turns "hangs forever" into
+    # "fails immediately with whatever error the CLI gives an unattended
+    # caller" — a real, diagnosable error instead of a bare timeout.
+    popen_kwargs = {"stdin": subprocess.DEVNULL}
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
@@ -96,7 +104,14 @@ def _run_openclaw(args: list, openclaw_binary: str = None, timeout: float = DEFA
     except FileNotFoundError as exc:
         raise OpenClawCliError(f"openclaw executable not found ({binary})") from exc
     except subprocess.TimeoutExpired as exc:
-        raise OpenClawCliError(f"openclaw {' '.join(args)} timed out after {timeout}s") from exc
+        partial_out = (getattr(exc, "stdout", None) or "").strip()
+        partial_err = (getattr(exc, "stderr", None) or "").strip()
+        detail = ""
+        if partial_err:
+            detail += f"\nstderr so far:\n{partial_err[-2000:]}"
+        if partial_out:
+            detail += f"\nstdout so far:\n{partial_out[-2000:]}"
+        raise OpenClawCliError(f"openclaw {' '.join(args)} timed out after {timeout}s{detail}") from exc
     if result.returncode != 0:
         raise OpenClawCliError((result.stderr or "").strip() or f"openclaw {' '.join(args)} exited with status {result.returncode}")
     return result.stdout or ""

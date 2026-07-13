@@ -119,6 +119,33 @@ def test_run_openclaw_returns_stdout(monkeypatch):
     assert captured["cmd"] == ["openclaw", "agents", "list", "--json"]
 
 
+def test_run_openclaw_closes_stdin_to_avoid_hanging_on_a_prompt(monkeypatch):
+    # A real field report: `openclaw agents list --json` hung until timeout
+    # with the gateway running. If the CLI ever falls back to reading a
+    # prompt from stdin, an inherited stdin lets it block forever instead of
+    # failing fast — stdin must always be closed for a caller with no
+    # terminal to answer it.
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeCompletedProcess(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw._run_openclaw(["agents", "list", "--json"], openclaw_binary="openclaw")
+    assert captured["kwargs"]["stdin"] == openclaw.subprocess.DEVNULL
+
+
+def test_run_openclaw_timeout_surfaces_partial_output(monkeypatch):
+    def fake_run(*a, **k):
+        raise openclaw.subprocess.TimeoutExpired(cmd="openclaw", timeout=15, output="partial stdout", stderr="partial stderr")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    with pytest.raises(openclaw.OpenClawCliError, match="partial stdout") as exc_info:
+        openclaw._run_openclaw(["agents", "list", "--json"], openclaw_binary="openclaw", timeout=15)
+    assert "partial stderr" in str(exc_info.value)
+
+
 def test_run_openclaw_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(
         openclaw.subprocess, "run",
