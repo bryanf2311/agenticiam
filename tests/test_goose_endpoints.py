@@ -502,6 +502,10 @@ def test_create_goose_agent_with_manager_permission_writes_recipe(client, admin_
     recipe = yaml.safe_load(open(recipe_path, encoding="utf-8"))
     assert recipe["title"] == "boss (manager)"
     assert "iamDispatchToAgent" in recipe["instructions"]
+    # regression: without this, `goose run --recipe ...` silently falls back
+    # to Goose's own global default provider/model instead of the one this
+    # manager was actually created with
+    assert recipe["settings"] == {"goose_provider": "ollama", "goose_model": "llama3.1:8b"}
 
     # goose session has no --recipe flag — must use `goose run --recipe ... --interactive`
     commands = body["launch_commands"]

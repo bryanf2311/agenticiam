@@ -390,6 +390,29 @@ def test_write_manager_recipe_overwrites_existing(tmp_path, monkeypatch):
     assert path.read_text(encoding="utf-8").count("version:") == 1
 
 
+def test_manager_recipe_yaml_without_provider_model_has_no_settings_block():
+    # matches the original behavior when a manager was created with no model picked
+    parsed = yaml.safe_load(goose.manager_recipe_yaml("boss"))
+    assert "settings" not in parsed
+
+
+def test_manager_recipe_yaml_embeds_settings_so_it_does_not_silently_use_the_wrong_model():
+    # regression test: a recipe with no settings block falls back to
+    # Goose's own global default provider/model instead of the one this
+    # manager was actually created with — confirmed from a real report
+    # where `goose run --recipe ...` launched with a completely different
+    # model than the agent was configured with.
+    parsed = yaml.safe_load(goose.manager_recipe_yaml("boss", provider="ollama_cloud", model="gemini-3-flash-preview"))
+    assert parsed["settings"] == {"goose_provider": "ollama_cloud", "goose_model": "gemini-3-flash-preview"}
+
+
+def test_write_manager_recipe_passes_through_provider_and_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(goose, "config_path", lambda: tmp_path / "goose" / "config.yaml")
+    path = goose.write_manager_recipe("boss", provider="anthropic", model="claude-sonnet-5")
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert parsed["settings"] == {"goose_provider": "anthropic", "goose_model": "claude-sonnet-5"}
+
+
 def test_set_default_provider_model_with_context_limit_ollama():
     result = goose.set_default_provider_model({}, "ollama", "llama3.1:8b", context_limit=16000)
     assert result["GOOSE_CONTEXT_LIMIT"] == 16000

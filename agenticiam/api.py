@@ -756,7 +756,7 @@ def create_app(db_path=None) -> Flask:
         if is_manager:
             try:
                 if target == "goose":
-                    recipe_path = goose.write_manager_recipe(name)
+                    recipe_path = goose.write_manager_recipe(name, provider=provider, model=model)
                 else:
                     soul_path = openclaw.write_manager_soul(name)
             except OSError as exc:

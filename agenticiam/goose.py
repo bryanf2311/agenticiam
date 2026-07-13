@@ -449,29 +449,39 @@ async function run() {
 """
 
 
-def manager_recipe_yaml(name: str) -> str:
+def manager_recipe_yaml(name: str, provider: str = None, model: str = None) -> str:
     """A Goose recipe (see block/goose's recipe-reference docs) whose
     `instructions` field is the manager system prompt above — loaded via
     `goose run --recipe ...` so a manager agent gets it automatically
-    instead of requiring it to be pasted in by hand every session."""
-    return yaml.safe_dump(
-        {
-            "version": "1.0.0",
-            "title": f"{name} (manager)",
-            "description": f"AgenticIAM manager recipe for '{name}' — preloads the dispatch-to-agent system prompt.",
-            "instructions": MANAGER_SYSTEM_PROMPT,
-        },
-        default_flow_style=False,
-        sort_keys=False,
-    )
+    instead of requiring it to be pasted in by hand every session.
+
+    Without an explicit `settings` block, a recipe silently falls back to
+    Goose's own default provider/model (whatever was configured first via
+    `goose configure`) instead of the one this manager was actually set up
+    with — confirmed from a real report where a recipe launched with a
+    completely different model than the agent was created with. The recipe
+    reference docs describe `settings.goose_provider`/`goose_model` as
+    exactly the override for this: "This overrides the default
+    configuration when the recipe is executed."
+    """
+    recipe = {
+        "version": "1.0.0",
+        "title": f"{name} (manager)",
+        "description": f"AgenticIAM manager recipe for '{name}' — preloads the dispatch-to-agent system prompt.",
+        "instructions": MANAGER_SYSTEM_PROMPT,
+    }
+    if provider and model:
+        settings = {"goose_provider": provider, "goose_model": model}
+        recipe["settings"] = settings
+    return yaml.safe_dump(recipe, default_flow_style=False, sort_keys=False)
 
 
-def write_manager_recipe(name: str) -> Path:
+def write_manager_recipe(name: str, provider: str = None, model: str = None) -> Path:
     directory = recipes_dir()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{slugify(name)}.yaml"
     with open(path, "w", encoding="utf-8") as f:
-        f.write(manager_recipe_yaml(name))
+        f.write(manager_recipe_yaml(name, provider=provider, model=model))
     return path
 
 
