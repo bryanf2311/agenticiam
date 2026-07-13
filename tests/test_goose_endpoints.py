@@ -321,6 +321,90 @@ def test_create_goose_agent_end_to_end(client, admin_headers, goose_config_path)
     assert set(perms) == {"files:read", "shell:exec"}
 
 
+# ---------------------------------------------------------------- ollama cloud
+
+def test_goose_models_ollama_cloud_requires_key(client, admin_headers):
+    resp = client.post("/v1/admin/goose/models", json={"provider": "ollama_cloud"}, headers=admin_headers)
+    body = resp.get_json()
+    assert body["available"] is False
+    assert "API key" in body["error"]
+
+
+def test_goose_models_ollama_cloud_with_key(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(goose, "list_ollama_cloud_models", lambda api_key, timeout=5.0: ["gpt-oss:120b-cloud"])
+    resp = client.post(
+        "/v1/admin/goose/models", json={"provider": "ollama_cloud", "api_key": "fake-cloud-key"}, headers=admin_headers
+    )
+    assert resp.get_json() == {"available": True, "models": ["gpt-oss:120b-cloud"]}
+
+
+def test_create_goose_agent_ollama_cloud_uses_provider_model_flags_and_flags_configure_required(
+    client, admin_headers, goose_config_path
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "cloud-bot", "permissions": [], "provider": "ollama_cloud",
+            "model": "gpt-oss:120b-cloud", "api_key": "sk-fake-cloud-key",
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert body["goose_configure_required"] is True
+    commands = body["launch_commands"]
+    assert "goose run --provider ollama_cloud --model" in commands["bash"]
+    for variant in commands.values():
+        assert "GOOSE_PROVIDER" not in variant
+        assert "sk-fake-cloud-key" not in variant  # never leaked into the command
+
+    # the extension is still registered normally — that part is provider-agnostic
+    assert body["goose_config_written"] is True
+    assert "cloud-bot" in goose.load_config()["extensions"]
+
+
+def test_create_goose_agent_ollama_cloud_set_as_default_is_silently_skipped(
+    client, admin_headers, goose_config_path
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "cloud-bot", "permissions": [], "provider": "ollama_cloud",
+            "model": "gpt-oss:120b-cloud", "set_as_default": True,
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    written = goose.load_config()
+    # GOOSE_PROVIDER=ollama_cloud in config.yaml would fail the same way the
+    # env var would (both go through Goose's from_env path), so set_as_default
+    # must be ignored for this provider rather than writing a broken default.
+    assert "GOOSE_PROVIDER" not in written
+
+
+def test_create_openclaw_agent_ollama_cloud_includes_provider_registration_command(
+    client, admin_headers, goose_config_path, openclaw_workspace_root
+):
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "cloud-bot", "target": "openclaw", "permissions": [], "provider": "ollama_cloud",
+            "model": "gpt-oss:120b-cloud", "api_key": "sk-fake-cloud-key",
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    commands = body["openclaw_commands"]
+    assert "register_cloud_provider" in commands
+    assert f"models.providers.{openclaw.OLLAMA_CLOUD_PROVIDER_ID}" in commands["register_cloud_provider"]["bash"]
+    assert "sk-fake-cloud-key" in commands["register_cloud_provider"]["bash"]
+    assert f'--model "{openclaw.OLLAMA_CLOUD_PROVIDER_ID}/gpt-oss:120b-cloud"' in commands["create_agent"]["bash"]
+    # webui.py renders openclaw_commands by explicit key (register_cloud_provider
+    # before create_agent), not dict iteration order — JSON key order isn't
+    # preserved through jsonify (Flask's default JSON provider sorts keys)
+
+
 def test_create_goose_agent_with_manager_permission_writes_recipe(client, admin_headers, goose_config_path):
     resp = client.post(
         "/v1/admin/goose/agents",

@@ -143,6 +143,12 @@ models plus even a 70B in Usable — GPU-offloaded where it fits, spilling
 into your 64GB of system RAM for the rest, meaningfully slower but not
 unusable for non-realtime tasks.
 
+The Setup tab also has an **Ollama Cloud** panel — hosted, bigger models
+via an API key from `ollama.com/settings/keys`, nothing to install since
+it's not a local server. See "One thing worth knowing about Ollama
+Cloud" below the wizard section for the Goose-vs-OpenClaw asymmetry (one
+needs a manual one-time `goose configure` step, the other doesn't).
+
 ## Web admin console
 
 `agenticiam serve` (and `agenticiam gui`, which is just `serve` plus
@@ -159,7 +165,7 @@ It's a thin client over the same `/v1/admin/*` REST API described below —
 anything you can do in the browser you can also script against those
 endpoints directly.
 
-## New Agent wizard (Goose or OpenClaw + Ollama/Anthropic/Google)
+## New Agent wizard (Goose or OpenClaw + Ollama/Ollama Cloud/Anthropic/Google)
 
 The **+ New Agent** button in the web console is a 4-step wizard that goes
 from nothing to a running, permissioned AI agent:
@@ -177,6 +183,13 @@ from nothing to a running, permissioned AI agent:
    commands for all three.
 2. **Name, provider & model** — pick a name, then a provider:
    - **Ollama** (local, free) — models are listed live from Ollama's local API.
+   - **Ollama Cloud** (hosted, bigger models) — Ollama's own hosted API
+     (distinct from local Ollama; get an account + API key at
+     `ollama.com/settings/keys`). Paste the key and click "Load models" to
+     fetch the live list from `ollama.com/api/tags`, same shape as local
+     Ollama's `/api/tags`, just Bearer-authenticated. See "One thing worth
+     knowing about Ollama Cloud" below — it needs one manual step for a
+     Goose-target agent, none for OpenClaw.
    - **Anthropic** (Claude) or **Google** (Gemini) — paste an API key and
      click "Load models" to fetch the live list from that provider's own
      API (`api.anthropic.com/v1/models` / `generativelanguage.googleapis.com`).
@@ -184,7 +197,8 @@ from nothing to a running, permissioned AI agent:
      in Goose's `config.yaml`. It only ever appears once, embedded in the
      launch command shown in the final step, matching Goose's own guidance
      against keeping provider API keys in plaintext config files (it
-     expects them via env var or its OS-keyring-backed secret store).
+     expects them via env var or its OS-keyring-backed secret store). This
+     applies to the Ollama Cloud key too.
 3. **Permissions** — check off common scopes (`shell:exec`, `files:read`,
    `files:write`, `browser:control`, `email:send`) or type custom ones;
    this becomes a role scoped to just this agent. There's also an
@@ -213,6 +227,37 @@ from nothing to a running, permissioned AI agent:
    (creates the persona). A manager agent gets a `SOUL.md` written into
    that workspace directory instead of a Goose recipe — same dispatch
    system prompt, OpenClaw's own mechanism for a persona's system prompt.
+
+### One thing worth knowing about Ollama Cloud
+
+Ollama Cloud behaves asymmetrically across the two targets, and it's not
+an AgenticIAM limitation — it's how each runtime's own code handles it:
+
+- **Goose**: confirmed against block/goose's `providers/ollama_cloud.rs`
+  source, its `from_env` implementation unconditionally returns an error —
+  *"Ollama Cloud must be configured as a declarative provider. Run `goose
+  configure` to set it up."* Every other provider in this wizard can be
+  selected purely through a one-time launch command's environment
+  variables; Ollama Cloud can't, by Goose's own design (the API key is
+  meant to go through `goose configure`'s interactive flow into its
+  keyring/secrets store, not a plaintext env var). So for a Goose-target
+  Ollama Cloud agent, step 5 shows a one-time-setup callout: run `goose
+  configure` once, choose **Ollama Cloud** (or "Add a Custom Provider"
+  with base URL `https://ollama.com/v1`, engine "OpenAI Compatible") and
+  paste the key there — Goose stores it itself, AgenticIAM never sees or
+  stores it either way. After that one-time step, the generated
+  `goose run --provider ollama_cloud --model <model> --interactive -n
+  <name>` command works normally (`--provider`/`--model` select an
+  already-configured provider, unlike env vars, which are the piece that's
+  blocked).
+- **OpenClaw**: fully scriptable, no manual step. OpenClaw's model
+  provider config (`models.providers.<id>`) is plain JSON reachable
+  through its own `config set --merge` CLI, not a keyring-backed
+  declarative-provider file — so the wizard's step 5 includes an extra
+  first command, `openclaw config set models.providers.ollama-cloud
+  '{"baseUrl":"https://ollama.com/v1","apiKey":"...","api":"openai-completions"}'
+  --strict-json --merge`, before the usual tool-registration and
+  agent-creation commands.
 
 Two things worth knowing:
 

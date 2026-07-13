@@ -19,13 +19,23 @@ GitHub docs source), not guessed:
   --workspace <dir>` creates an isolated agent persona; `--non-interactive`
   requires `--workspace`. Each agent's workspace holds a `SOUL.md` file that
   defines its persona/system prompt.
+- Custom model providers (including Ollama Cloud, which isn't one of
+  OpenClaw's built-in provider ids) go under `models.providers.<id>` —
+  `baseUrl`/`apiKey`/`api` fields, `api: "openai-completions"` for
+  self-hosted /v1/chat/completions-shaped backends (which is what
+  ollama.com's hosted API is) — set non-destructively via
+  `openclaw config set models.providers.<id> '<json>' --strict-json --merge`.
 """
 
+import json
 import os
 import shutil
 from pathlib import Path
 
 from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for callers)
+
+OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
+OLLAMA_CLOUD_PROVIDER_ID = "ollama-cloud"
 
 
 def find_openclaw_binary() -> str:
@@ -78,15 +88,41 @@ def mcp_add_commands(name: str, cmd: str, args: list, token: str) -> dict:
     }
 
 
+# AgenticIAM/Goose call this provider "ollama_cloud" (matching Goose's own
+# internal provider id); the custom provider we register with OpenClaw
+# under models.providers uses OLLAMA_CLOUD_PROVIDER_ID ("ollama-cloud")
+# instead, since OpenClaw has no built-in provider of that name.
+_PROVIDER_ID_OVERRIDES = {"ollama_cloud": OLLAMA_CLOUD_PROVIDER_ID}
+
+
 def agent_add_command(name: str, provider: str, model: str) -> dict:
     """`openclaw agents add` invocation that creates the persona (workspace,
     session store, model) — the OpenClaw equivalent of Goose's `goose
     session -n <name>` / `goose run --recipe ...` launch command."""
     slug = slugify(name)
-    model_ref = f"{provider}/{model}" if provider and model else model
+    openclaw_provider = _PROVIDER_ID_OVERRIDES.get(provider, provider)
+    model_ref = f"{openclaw_provider}/{model}" if openclaw_provider and model else model
     ws = workspace_path(name)
     cmd = f'openclaw agents add {slug} --model "{model_ref}" --non-interactive --workspace "{ws}"'
     return {"bash": cmd, "powershell": cmd, "cmd": cmd}
+
+
+def ollama_cloud_provider_command(api_key: str, model: str = None) -> dict:
+    """`openclaw config set models.providers.<id> ...` invocation that
+    registers Ollama Cloud as a custom OpenClaw model provider (there's no
+    OpenClaw built-in provider for it) — the OpenClaw equivalent of Goose's
+    one-time `goose configure` step for the same thing. Unlike Goose's
+    path, this one *is* fully scriptable: OpenClaw's custom-provider config
+    is plain JSON reachable through its own `config set --merge` CLI, not a
+    keyring-backed declarative provider file."""
+    payload = {"baseUrl": OLLAMA_CLOUD_BASE_URL, "apiKey": api_key, "api": "openai-completions"}
+    if model:
+        payload["models"] = [{"id": model}]
+    json_str = json.dumps(payload)
+    bash_cmd = f"openclaw config set models.providers.{OLLAMA_CLOUD_PROVIDER_ID} '{json_str}' --strict-json --merge"
+    cmd_json = json_str.replace('"', '\\"')
+    cmd_cmd = f'openclaw config set models.providers.{OLLAMA_CLOUD_PROVIDER_ID} "{cmd_json}" --strict-json --merge'
+    return {"bash": bash_cmd, "powershell": bash_cmd, "cmd": cmd_cmd}
 
 
 def manager_soul_md(name: str) -> str:

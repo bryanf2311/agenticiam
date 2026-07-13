@@ -149,6 +149,36 @@ def test_list_anthropic_models_parses_response(monkeypatch):
     assert captured["headers"]["X-api-key"] == "sk-ant-fake"
 
 
+def test_list_ollama_cloud_models_requires_key():
+    with pytest.raises(goose.ProviderUnavailable):
+        goose.list_ollama_cloud_models(None)
+
+
+def test_list_ollama_cloud_models_parses_response(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"models": [{"name": "gpt-oss:120b-cloud"}, {"name": "qwen3-coder:480b-cloud"}]}).encode()
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = dict(req.header_items())
+        captured["url"] = req.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr(goose.urllib.request, "urlopen", fake_urlopen)
+    models = goose.list_ollama_cloud_models("fake-cloud-key")
+    assert models == ["gpt-oss:120b-cloud", "qwen3-coder:480b-cloud"]
+    assert captured["headers"]["Authorization"] == "Bearer fake-cloud-key"
+    assert captured["url"] == "https://ollama.com/api/tags"
+
+
 def test_list_google_models_requires_key():
     with pytest.raises(goose.ProviderUnavailable):
         goose.list_google_models(None)
@@ -172,9 +202,11 @@ def test_list_google_models_parses_response(monkeypatch):
 
 def test_list_provider_models_dispatches(monkeypatch):
     monkeypatch.setattr(goose, "list_ollama_models", lambda timeout=2.0: ["a"])
+    monkeypatch.setattr(goose, "list_ollama_cloud_models", lambda api_key, timeout=5.0: ["a-cloud"])
     monkeypatch.setattr(goose, "list_anthropic_models", lambda api_key, timeout=5.0: ["b"])
     monkeypatch.setattr(goose, "list_google_models", lambda api_key, timeout=5.0: ["c"])
     assert goose.list_provider_models("ollama") == ["a"]
+    assert goose.list_provider_models("ollama_cloud", api_key="k") == ["a-cloud"]
     assert goose.list_provider_models("anthropic", api_key="k") == ["b"]
     assert goose.list_provider_models("google", api_key="k") == ["c"]
     with pytest.raises(ValueError):
@@ -246,6 +278,29 @@ def test_launch_commands_with_recipe_path_uses_goose_run_interactive():
 def test_launch_commands_with_recipe_path_and_model_still_sets_env_vars():
     commands = goose.launch_commands("boss", "ollama", "llama3.1:8b", recipe_path="/x/boss.yaml")
     assert commands["bash"] == "GOOSE_PROVIDER=ollama GOOSE_MODEL=llama3.1:8b goose run --recipe '/x/boss.yaml' --interactive -n boss"
+
+
+def test_launch_commands_ollama_cloud_uses_provider_model_flags_not_env_vars():
+    commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud")
+    assert commands["bash"] == "goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' --interactive -n boss"
+    assert commands["powershell"] == "goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' --interactive -n boss"
+    assert commands["cmd"] == 'goose run --provider ollama_cloud --model "gpt-oss:120b-cloud" --interactive -n boss'
+    for variant in commands.values():
+        assert "GOOSE_PROVIDER" not in variant
+        assert "GOOSE_MODEL" not in variant
+
+
+def test_launch_commands_ollama_cloud_never_leaks_api_key_via_env():
+    commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud", api_key="should-never-appear")
+    for variant in commands.values():
+        assert "should-never-appear" not in variant
+
+
+def test_launch_commands_ollama_cloud_recipe_path_still_takes_priority():
+    # a manager's recipe launch command must win even for ollama_cloud
+    commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud", recipe_path="/x/boss.yaml")
+    assert "--recipe '/x/boss.yaml'" in commands["bash"]
+    assert "--provider ollama_cloud" not in commands["bash"]
 
 
 def test_manager_recipe_yaml_has_required_fields_and_prompt_body():

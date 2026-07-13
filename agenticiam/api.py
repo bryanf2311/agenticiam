@@ -527,11 +527,19 @@ def create_app(db_path=None) -> Flask:
                     # fresh one (Identities tab -> rotate/issue key) and
                     # substitute it here if you need to re-run this command.
                     cmd, args = _self_command()
-                    openclaw_commands = {
-                        "register_tools": {"title": "Register AgenticIAM's tools with OpenClaw",
-                                            **openclaw.mcp_add_commands(member["name"], cmd, args, "<issue-a-new-api-key-for-this-identity>")},
-                        "create_agent": {"title": "Create the OpenClaw agent persona",
-                                          **openclaw.agent_add_command(member["name"], goose_meta["provider"], goose_meta["model"])},
+                    openclaw_commands = {}
+                    if goose_meta["provider"] == "ollama_cloud":
+                        openclaw_commands["register_cloud_provider"] = {
+                            "title": "Register Ollama Cloud as a model provider with OpenClaw",
+                            **openclaw.ollama_cloud_provider_command("<your-ollama-cloud-api-key>", goose_meta["model"]),
+                        }
+                    openclaw_commands["register_tools"] = {
+                        "title": "Register AgenticIAM's tools with OpenClaw",
+                        **openclaw.mcp_add_commands(member["name"], cmd, args, "<issue-a-new-api-key-for-this-identity>"),
+                    }
+                    openclaw_commands["create_agent"] = {
+                        "title": "Create the OpenClaw agent persona",
+                        **openclaw.agent_add_command(member["name"], goose_meta["provider"], goose_meta["model"]),
                     }
                 else:
                     commands = goose.launch_commands(
@@ -805,15 +813,21 @@ def create_app(db_path=None) -> Flask:
             "is_manager": is_manager,
         }
 
+        env_unconfigurable = provider in goose.GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
         if target == "goose":
+            result["goose_configure_required"] = env_unconfigurable
             # once set_as_default writes GOOSE_PROVIDER/GOOSE_MODEL/GOOSE_CONTEXT_LIMIT
-            # into config.yaml, a per-invocation env override would just be redundant
+            # into config.yaml, a per-invocation env override would just be redundant.
+            # For env_unconfigurable providers, set_as_default is skipped entirely —
+            # GOOSE_PROVIDER=ollama_cloud in config.yaml would fail the exact same way
+            # the env var would (Goose loads config.yaml through the same from_env path).
+            set_default = set_as_default and not env_unconfigurable
             result["config_path"] = str(goose.config_path())
             result["launch_commands"] = goose.launch_commands(
                 name,
                 provider,
-                None if set_as_default else model,
-                context_limit=None if set_as_default else context_limit,
+                None if set_default else model,
+                context_limit=None if set_default else context_limit,
                 api_key=api_key,
                 recipe_path=recipe_path,
             )
@@ -823,7 +837,7 @@ def create_app(db_path=None) -> Flask:
             try:
                 cfg = goose.load_config()
                 cfg = goose.register_extension(cfg, extension_id, name, cmd, args, key["key"])
-                if set_as_default and model:
+                if set_default and model:
                     cfg = goose.set_default_provider_model(cfg, provider, model, context_limit=context_limit)
                 written_path = goose.save_config(cfg)
                 result["goose_config_written"] = True
@@ -836,10 +850,21 @@ def create_app(db_path=None) -> Flask:
             # OpenClaw ships its own CLI for editing its JSON5 config safely
             # (openclaw mcp add / openclaw agents add) — we generate the
             # commands rather than writing openclaw.json ourselves.
-            result["openclaw_commands"] = {
-                "register_tools": {"title": "Register AgenticIAM's tools with OpenClaw", **openclaw.mcp_add_commands(name, cmd, args, key["key"])},
-                "create_agent": {"title": "Create the OpenClaw agent persona", **openclaw.agent_add_command(name, provider, model)},
+            openclaw_commands = {}
+            if provider == "ollama_cloud":
+                openclaw_commands["register_cloud_provider"] = {
+                    "title": "Register Ollama Cloud as a model provider with OpenClaw",
+                    **openclaw.ollama_cloud_provider_command(api_key, model),
+                }
+            openclaw_commands["register_tools"] = {
+                "title": "Register AgenticIAM's tools with OpenClaw",
+                **openclaw.mcp_add_commands(name, cmd, args, key["key"]),
             }
+            openclaw_commands["create_agent"] = {
+                "title": "Create the OpenClaw agent persona",
+                **openclaw.agent_add_command(name, provider, model),
+            }
+            result["openclaw_commands"] = openclaw_commands
             result["manager_soul_path"] = str(soul_path) if soul_path else None
             result["manager_soul_error"] = soul_error
 

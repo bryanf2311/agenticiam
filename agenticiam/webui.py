@@ -256,6 +256,7 @@ const WIZARD_COMMON_PERMISSIONS = [
 
 const WIZARD_PROVIDERS = [
   ['ollama', 'Ollama (local, free)'],
+  ['ollama_cloud', 'Ollama Cloud (hosted, bigger models — API key)'],
   ['anthropic', 'Anthropic (Claude — API key)'],
   ['google', 'Google (Gemini — API key)'],
 ];
@@ -496,11 +497,13 @@ function renderWizardStep4() {
       <input id="wiz-cmd" value="${esc(wizardState.cmd)}">
       <label>Arguments (space-separated)</label>
       <input id="wiz-args" value="${esc(wizardState.args)}">
-      ${wizardState.target === 'goose' ? `
+      ${wizardState.target === 'goose' && wizardState.provider !== 'ollama_cloud' ? `
       <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
         <input type="checkbox" id="wiz-default" ${wizardState.setDefault ? 'checked' : ''} style="width:auto">
         <span>Also set this as Goose's default provider/model/context window (affects <em>all</em> Goose sessions, not just this agent)</span>
       </label>` : ''}
+      ${wizardState.target === 'goose' && wizardState.provider === 'ollama_cloud' ? `
+      <div class="err" style="margin-top:14px">One-time setup required: Ollama Cloud can't be selected via environment variables in Goose — you'll need to run <span class="mono">goose configure</span> once and add/select Ollama Cloud there with this API key before the launch command below will work. See the next screen for details.</div>` : ''}
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
         <button id="wiz-create">Create agent</button>
@@ -571,11 +574,20 @@ function renderWizardStep5() {
         <h3>Agent created</h3>
         <p class="ok">"${esc(r.identity.name)}" is ready.${r.group ? ` Added to group "${esc(r.group)}".` : ''}</p>
         ${managerNote}
-        <p class="hint">Run these two commands (same machine as the OpenClaw Gateway) to finish wiring it up:</p>
+        <p class="hint">Run ${r.openclaw_commands.register_cloud_provider ? 'these three commands' : 'these two commands'} (same machine as the OpenClaw Gateway), in order, to finish wiring it up:</p>
+        ${r.openclaw_commands.register_cloud_provider ? `
+        <label>1. ${esc(r.openclaw_commands.register_cloud_provider.title)}</label>
+        ${renderCommandShells(r.openclaw_commands.register_cloud_provider, 'register_cloud_provider')}
+        <label style="margin-top:18px">2. ${esc(r.openclaw_commands.register_tools.title)}</label>
+        ${renderCommandShells(r.openclaw_commands.register_tools, 'register_tools')}
+        <label style="margin-top:18px">3. ${esc(r.openclaw_commands.create_agent.title)}</label>
+        ${renderCommandShells(r.openclaw_commands.create_agent, 'create_agent')}
+        ` : `
         <label>1. ${esc(r.openclaw_commands.register_tools.title)}</label>
         ${renderCommandShells(r.openclaw_commands.register_tools, 'register_tools')}
         <label style="margin-top:18px">2. ${esc(r.openclaw_commands.create_agent.title)}</label>
         ${renderCommandShells(r.openclaw_commands.create_agent, 'create_agent')}
+        `}
         <p class="hint">Then run <span class="mono">openclaw gateway restart</span> and either bind a channel to this new agent or chat with it directly from the Control UI (<span class="mono">openclaw dashboard</span>).</p>
         <div class="submit-row row">
           <button id="wiz-another">Create another agent</button>
@@ -599,6 +611,9 @@ function renderWizardStep5() {
         : `<div class="err">Couldn't write Goose config automatically: ${esc(r.goose_config_error)}</div>
            <p>Add this to <span class="mono">${esc(r.config_path)}</span> by hand:</p>
            <textarea rows="9" readonly>${esc(r.manual_extension_snippet)}</textarea>`}
+      ${r.goose_configure_required ? `
+      <div class="err">One-time setup required before the command below will work: Ollama Cloud can't be selected via environment variables in Goose (its own provider code requires this). Run <span class="mono">goose configure</span>, choose <strong>Ollama Cloud</strong> from the provider list (or "Add a Custom Provider" with base URL <span class="mono">https://ollama.com/v1</span> if it's not listed), and paste your Ollama Cloud API key (get one at <span class="mono">ollama.com/settings/keys</span>) when prompted — Goose stores it itself, AgenticIAM never sees or stores it. If Goose names the configured provider something other than <span class="mono">ollama_cloud</span>, substitute that name for <span class="mono">--provider ollama_cloud</span> below.</div>
+      ` : ''}
       <label>Run this to start chatting with your agent — pick the line for your terminal:</label>
       ${renderCommandShells(r.launch_commands, 'launch')}
       <div class="submit-row row">
@@ -639,6 +654,19 @@ async function renderSetup() {
               </div>
             </div>`).join('')}
         </div>`).join('')}
+      <div class="panel">
+        <h3>Ollama Cloud <span class="hint">(hosted, bigger models — optional)</span></h3>
+        <p class="hint">Nothing to install — it's a hosted API, not a local server. Get an API key at
+          <span class="mono">ollama.com/settings/keys</span>, then pick "Ollama Cloud" as the provider in the New Agent
+          wizard. One caveat depending on target:</p>
+        <p class="hint"><strong>Goose:</strong> requires a one-time <span class="mono">goose configure</span> step
+          (choose "Ollama Cloud" from the provider list, or "Add a Custom Provider" with base URL
+          <span class="mono">https://ollama.com/v1</span>) before the wizard's launch command will work — Goose's own
+          provider code doesn't support configuring it via environment variables, unlike every other provider here.</p>
+        <p class="hint"><strong>OpenClaw:</strong> fully scriptable — the wizard generates an extra
+          <span class="mono">openclaw config set models.providers...</span> command that registers it, no manual step
+          needed.</p>
+      </div>
       <div class="panel">
         <h3>Model recommendations for your hardware</h3>
         <p class="hint">Sizes are approximate (Q4_K_M quantization, Ollama's common default) — a starting point, not an exact fit.</p>

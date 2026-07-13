@@ -29,8 +29,18 @@ from pathlib import Path
 import yaml
 
 OLLAMA_API_BASE = "http://127.0.0.1:11434"
+OLLAMA_CLOUD_API_BASE = "https://ollama.com"
 ANTHROPIC_API_BASE = "https://api.anthropic.com"
 GOOGLE_API_BASE = "https://generativelanguage.googleapis.com"
+
+# Ollama Cloud (hosted models on ollama.com, distinct from local Ollama)
+# cannot be configured via env vars in Goose — confirmed against
+# block/goose's providers/ollama_cloud.rs: its `from_env` implementation
+# unconditionally bails with "Ollama Cloud must be configured as a
+# declarative provider. Run `goose configure` to set it up." So unlike
+# every other provider here, it needs a one-time interactive `goose
+# configure` step before any generated launch command will work.
+GOOSE_ENV_UNCONFIGURABLE_PROVIDERS = {"ollama_cloud"}
 
 # Confirmed against block/goose's actual provider source (anthropic_def.rs,
 # google_def.rs) and its provider docs table — not guessed. Note Gemini's
@@ -113,6 +123,27 @@ def list_anthropic_models(api_key: str, timeout: float = 5.0) -> list:
     return sorted(m["id"] for m in data.get("data", []) if m.get("id"))
 
 
+def list_ollama_cloud_models(api_key: str, timeout: float = 5.0) -> list:
+    """Ollama Cloud (hosted models on ollama.com, distinct from local
+    Ollama) uses the same /api/tags shape as local Ollama, just at
+    ollama.com with Bearer auth instead of no-auth localhost — confirmed
+    against block/goose's own ollama_cloud provider source
+    (build_ollama_api_client uses AuthMethod::BearerToken against the
+    configured host, and fetch_ollama_model_names hits "api/tags")."""
+    if not api_key:
+        raise ProviderUnavailable("an Ollama Cloud API key is required to list models")
+    req = urllib.request.Request(
+        f"{OLLAMA_CLOUD_API_BASE}/api/tags",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ProviderUnavailable(str(exc)) from exc
+    return sorted(m["name"] for m in data.get("models", []) if m.get("name"))
+
+
 def list_google_models(api_key: str, timeout: float = 5.0) -> list:
     if not api_key:
         raise ProviderUnavailable("a Google API key is required to list models")
@@ -135,6 +166,8 @@ def list_google_models(api_key: str, timeout: float = 5.0) -> list:
 def list_provider_models(provider: str, api_key: str = None, timeout: float = 5.0) -> list:
     if provider == "ollama":
         return list_ollama_models(timeout=timeout)
+    if provider == "ollama_cloud":
+        return list_ollama_cloud_models(api_key, timeout=timeout)
     if provider == "anthropic":
         return list_anthropic_models(api_key, timeout=timeout)
     if provider == "google":
@@ -467,11 +500,28 @@ def launch_commands(
     flags (`goose session` has no `--recipe` option). Used for manager
     agents so their dispatch system prompt (see write_manager_recipe) loads
     automatically instead of needing to be pasted in every session.
+
+    A provider in GOOSE_ENV_UNCONFIGURABLE_PROVIDERS (currently just
+    `ollama_cloud`) can't be selected via env vars at all, so this instead
+    generates `goose run --provider <p> --model <m> --interactive`, which
+    selects an *already-configured* provider — the caller is responsible
+    for surfacing that the one-time `goose configure` setup is a
+    prerequisite (see the Setup tab / README).
     """
+    env_unconfigurable = provider in GOOSE_ENV_UNCONFIGURABLE_PROVIDERS
     if recipe_path:
         base = f"goose run --recipe '{recipe_path}' --interactive -n {name}"
         ps_base = f"goose run --recipe '{recipe_path}' --interactive -n {name}"
         cmd_base = f'goose run --recipe "{recipe_path}" --interactive -n {name}'
+    elif env_unconfigurable and model:
+        # Can't select this provider via GOOSE_PROVIDER env var (see
+        # GOOSE_ENV_UNCONFIGURABLE_PROVIDERS) — `goose run --provider/--model`
+        # flags select an *already-configured* provider instead, which is
+        # the only way to reach it once the one-time `goose configure` setup
+        # (see the Setup tab) has been done.
+        base = f"goose run --provider {provider} --model '{model}' --interactive -n {name}"
+        ps_base = f"goose run --provider {provider} --model '{model}' --interactive -n {name}"
+        cmd_base = f'goose run --provider {provider} --model "{model}" --interactive -n {name}'
     else:
         base = ps_base = cmd_base = f"goose session -n {name}"
     bash_parts, ps_parts, cmd_parts = [], [], []
@@ -485,7 +535,7 @@ def launch_commands(
             ps_parts.append(f'$env:{key}="{value}"')
         cmd_parts.append(f'set "{key}={value}"')
 
-    if model:
+    if model and not env_unconfigurable:
         provider = provider or "ollama"
         add("GOOSE_PROVIDER", provider)
         add("GOOSE_MODEL", model)
@@ -494,7 +544,7 @@ def launch_commands(
         if (provider or "ollama") == "ollama":
             add("GOOSE_INPUT_LIMIT", context_limit)
     key_env = PROVIDER_API_KEY_ENV.get(provider)
-    if key_env and api_key:
+    if key_env and api_key and not env_unconfigurable:
         add(key_env, api_key, quote=True)
 
     if not bash_parts:
