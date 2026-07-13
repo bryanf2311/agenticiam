@@ -283,9 +283,9 @@ def test_launch_commands_with_recipe_path_and_model_still_sets_env_vars():
 
 def test_launch_commands_ollama_cloud_uses_provider_model_flags_not_env_vars():
     commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud")
-    assert commands["bash"] == "goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' --interactive -n boss"
-    assert commands["powershell"] == "goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' --interactive -n boss"
-    assert commands["cmd"] == 'goose run --provider ollama_cloud --model "gpt-oss:120b-cloud" --interactive -n boss'
+    assert commands["bash"] == "goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' -t 'Hello' --interactive -n boss"
+    assert commands["powershell"] == "goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' -t 'Hello' --interactive -n boss"
+    assert commands["cmd"] == 'goose run --provider ollama_cloud --model "gpt-oss:120b-cloud" -t "Hello" --interactive -n boss'
     for variant in commands.values():
         assert "GOOSE_PROVIDER" not in variant
         assert "GOOSE_MODEL" not in variant
@@ -306,9 +306,20 @@ def test_launch_commands_ollama_cloud_recipe_path_still_takes_priority():
 
 def test_launch_commands_ollama_cloud_auto_configure_adds_disable_keyring_env():
     commands = goose.launch_commands("boss", "ollama_cloud", "gpt-oss:120b-cloud", auto_configure=True)
-    assert commands["bash"] == "GOOSE_DISABLE_KEYRING=1 goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' --interactive -n boss"
+    assert commands["bash"] == "GOOSE_DISABLE_KEYRING=1 goose run --provider ollama_cloud --model 'gpt-oss:120b-cloud' -t 'Hello' --interactive -n boss"
     assert '$env:GOOSE_DISABLE_KEYRING="1"' in commands["powershell"]
     assert 'set "GOOSE_DISABLE_KEYRING=1"' in commands["cmd"]
+
+
+def test_launch_commands_provider_flags_branch_always_includes_starting_text():
+    # regression test: `goose run` rejects `--interactive` on its own with
+    # "Must provide either --instructions (-i), --text (-t), or --recipe" —
+    # confirmed against a real `goose run` invocation, not just docs. Any
+    # future addition to GOOSE_ENV_UNCONFIGURABLE_PROVIDERS must keep -t
+    # present in this branch or it'll generate a command Goose rejects.
+    commands = goose.launch_commands("boss", "ollama_cloud", "some-model")
+    for variant in commands.values():
+        assert " -t " in variant or ' -t "' in variant
 
 
 def test_launch_commands_auto_configure_ignored_for_normal_providers():

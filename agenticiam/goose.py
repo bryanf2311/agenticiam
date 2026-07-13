@@ -561,9 +561,9 @@ def launch_commands(
 
     A provider in GOOSE_ENV_UNCONFIGURABLE_PROVIDERS (currently just
     `ollama_cloud`) can't be selected via env vars at all, so this instead
-    generates `goose run --provider <p> --model <m> --interactive`, which
-    selects an *already-configured* provider — the caller is responsible
-    for surfacing that the one-time `goose configure` setup is a
+    generates `goose run --provider <p> --model <m> -t 'Hello' --interactive`,
+    which selects an *already-configured* provider — the caller is
+    responsible for surfacing that the one-time `goose configure` setup is a
     prerequisite (see the Setup tab / README), unless `auto_configure` is
     set (see write_ollama_cloud_secret) — in which case this adds
     GOOSE_DISABLE_KEYRING=1 to the one-time command, scoped to just this
@@ -583,9 +583,16 @@ def launch_commands(
         # flags select an *already-configured* provider instead, which is
         # the only way to reach it once the one-time `goose configure` setup
         # (see the Setup tab) has been done.
-        base = f"goose run --provider {provider} --model '{model}' --interactive -n {name}"
-        ps_base = f"goose run --provider {provider} --model '{model}' --interactive -n {name}"
-        cmd_base = f'goose run --provider {provider} --model "{model}" --interactive -n {name}'
+        #
+        # `goose run` also always requires -i/-t/--recipe — `--interactive`
+        # only means "stay in the chat after the first turn," it does not
+        # waive that requirement (confirmed against a real `goose run`
+        # invocation, which rejected `--provider ... --model ... --interactive`
+        # alone with "Must provide either --instructions (-i), --text (-t),
+        # or --recipe"). So a starting -t text is required here too.
+        base = f"goose run --provider {provider} --model '{model}' -t 'Hello' --interactive -n {name}"
+        ps_base = f"goose run --provider {provider} --model '{model}' -t 'Hello' --interactive -n {name}"
+        cmd_base = f'goose run --provider {provider} --model "{model}" -t "Hello" --interactive -n {name}'
     else:
         base = ps_base = cmd_base = f"goose session -n {name}"
     bash_parts, ps_parts, cmd_parts = [], [], []
