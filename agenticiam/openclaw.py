@@ -440,6 +440,17 @@ def agent_add_command(name: str, provider: str, model: str, bind_telegram: bool 
     return {"bash": cmd, "powershell": cmd, "cmd": cmd}
 
 
+# Real field report: OpenClaw's config write is Zod-validated, and
+# models.providers.<id>.models is an array of objects, not bare strings —
+# each one needs at least `id` and `name` or the CLI rejects the whole
+# `config set` with "Config validation failed: ...models.0.name: Invalid
+# input". `contextWindow` isn't enforced by that same validation error but
+# is documented as needing to be >= 16000 (recommended >= 65536) for the
+# gateway's own tooling not to auto-block the model, so it's set here too
+# rather than leaving it to whatever OpenClaw's own default is.
+OPENCLAW_MODEL_MIN_CONTEXT_WINDOW = 65536
+
+
 def ollama_cloud_provider_command(api_key: str, model: str = None) -> dict:
     """`openclaw config set models.providers.<id> ...` invocation that
     registers Ollama Cloud as a custom OpenClaw model provider (there's no
@@ -450,7 +461,7 @@ def ollama_cloud_provider_command(api_key: str, model: str = None) -> dict:
     keyring-backed declarative provider file."""
     payload = {"baseUrl": OLLAMA_CLOUD_BASE_URL, "apiKey": api_key, "api": "openai-completions"}
     if model:
-        payload["models"] = [{"id": model}]
+        payload["models"] = [{"id": model, "name": model, "contextWindow": OPENCLAW_MODEL_MIN_CONTEXT_WINDOW}]
     json_str = json.dumps(payload)
     bash_cmd = f"openclaw config set models.providers.{OLLAMA_CLOUD_PROVIDER_ID} '{json_str}' --strict-json --merge"
     cmd_json = json_str.replace('"', '\\"')

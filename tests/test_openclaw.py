@@ -70,7 +70,15 @@ def test_ollama_cloud_provider_command_registers_openai_compatible_provider():
     assert payload["baseUrl"] == openclaw.OLLAMA_CLOUD_BASE_URL
     assert payload["apiKey"] == "sk-fake-cloud-key"
     assert payload["api"] == "openai-completions"
-    assert payload["models"] == [{"id": "gpt-oss:120b-cloud"}]
+    # Zod-validated on OpenClaw's end: a bare {"id": ...} is rejected with
+    # "Config validation failed: ...models.0.name: Invalid input" (a real
+    # field report) — name is required, and contextWindow is documented as
+    # needing to be >= 16000 (recommended >= 65536) or the gateway's own
+    # tooling auto-blocks the model.
+    assert payload["models"] == [{
+        "id": "gpt-oss:120b-cloud", "name": "gpt-oss:120b-cloud",
+        "contextWindow": openclaw.OPENCLAW_MODEL_MIN_CONTEXT_WINDOW,
+    }]
 
 
 def test_ollama_cloud_provider_command_cmd_variant_is_valid_json_when_unescaped():
