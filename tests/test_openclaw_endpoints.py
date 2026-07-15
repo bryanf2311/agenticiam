@@ -188,6 +188,21 @@ def test_tool_catalog_endpoint(client, admin_headers):
     assert "browser" in body["Web access"]
 
 
+def test_telegram_status_endpoint(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(openclaw, "get_telegram_status", lambda: {"configured": True, "dm_policy": "pairing"})
+    resp = client.get("/v1/admin/openclaw/telegram/status", headers=admin_headers)
+    assert resp.get_json() == {"configured": True, "dm_policy": "pairing"}
+
+
+def test_telegram_status_endpoint_surfaces_cli_error(client, admin_headers, monkeypatch):
+    def raise_error():
+        raise openclaw.OpenClawCliError("gateway not running")
+
+    monkeypatch.setattr(openclaw, "get_telegram_status", raise_error)
+    resp = client.get("/v1/admin/openclaw/telegram/status", headers=admin_headers)
+    assert resp.status_code == 502
+
+
 def test_connect_agent_telegram_requires_token(client, admin_headers):
     resp = client.post("/v1/admin/openclaw/agents/boss/telegram", json={}, headers=admin_headers)
     assert resp.status_code == 400

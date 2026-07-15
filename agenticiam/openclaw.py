@@ -42,10 +42,13 @@ GitHub docs source), not guessed:
   self-hosted /v1/chat/completions-shaped backends (which is what
   ollama.com's hosted API is) — set non-destructively via
   `openclaw config set models.providers.<id> '<json>' --strict-json --merge`.
-- `openclaw channels add --channel telegram --token-file <path>` registers
-  a bot token non-interactively and — per OpenClaw's own docs — asks a
+- `openclaw channels add --channel telegram --token <token>` registers a
+  bot token non-interactively and — per OpenClaw's own docs — asks a
   reachable local Gateway to start the account immediately, no restart
-  needed. `channels.telegram.dmPolicy` ("pairing" by default: the bot
+  needed. (Not `--token-file`: that persists as a `tokenFile` config
+  pointer, not a one-time read, and takes precedence over `botToken` even
+  when stale — see connect_telegram_channel's docstring for the real
+  field report.) `channels.telegram.dmPolicy` ("pairing" by default: the bot
   owner can use it right away, anyone else needs a one-time
   `openclaw pairing approve telegram <code>`; "open" with
   `allowFrom: ["*"]` skips that approval for everyone) lives at the same
@@ -60,7 +63,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for callers)
@@ -301,12 +303,22 @@ def connect_telegram_channel(
     start the account" right away, no restart needed, so the bot is live
     on Telegram as soon as this returns.
 
-    Uses --token-file, not --token: passing the token as a plain CLI
-    argument would put it in argv, visible to anything else on this
-    machine that can list processes (`ps aux`, Task Manager's command-line
-    column) for as long as the subprocess runs. OpenClaw's CLI accepts a
-    file instead, so a short-lived temp file is used and removed right
-    after (tempfile.mkstemp is 0600 / owner-only on POSIX by default).
+    Uses --token, not --token-file: a real field report (a user reading
+    their own openclaw.json after their bot went dark) showed --token-file
+    persists as a `tokenFile` config entry pointing at the path it was
+    given — not a one-time read — and that `tokenFile` takes precedence
+    over `botToken` even when a perfectly good inline token is also
+    present. This module's own previous version deleted its temp file
+    right after the command ran (to avoid a bare --token argument sitting
+    in argv/`ps aux` for the life of the subprocess call), which orphaned
+    that reference immediately: the very next time OpenClaw read its
+    config, `tokenFile` pointed at nothing and the channel silently failed
+    to authenticate, `botToken` never getting a chance to be used. The
+    token ends up persisted in openclaw.json in plaintext either way
+    (that's the whole point — the bot needs it long-term to keep
+    running), so the momentary argv exposure --token trades for is a much
+    smaller risk than a channel that goes dark on the next gateway
+    restart.
 
     dm_policy="pairing" (OpenClaw's own default) means only the bot owner
     can use it immediately; anyone else needs a one-time
@@ -316,24 +328,29 @@ def connect_telegram_channel(
     """
     if dm_policy not in TELEGRAM_DM_POLICIES:
         raise ValueError(f"dm_policy must be one of {TELEGRAM_DM_POLICIES}")
-    fd, path = tempfile.mkstemp(prefix="agenticiam-telegram-token-")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(token)
-        _run_openclaw(
-            ["channels", "add", "--channel", "telegram", "--token-file", path],
-            openclaw_binary=openclaw_binary, timeout=timeout,
-        )
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+    _run_openclaw(
+        ["channels", "add", "--channel", "telegram", "--token", token],
+        openclaw_binary=openclaw_binary, timeout=timeout,
+    )
     if dm_policy == "open":
         _config_set_verified("channels.telegram.dmPolicy", "open", openclaw_binary=openclaw_binary, timeout=timeout)
         _config_set_verified("channels.telegram.allowFrom", ["*"], openclaw_binary=openclaw_binary, timeout=timeout)
     else:
         _config_set_verified("channels.telegram.dmPolicy", "pairing", openclaw_binary=openclaw_binary, timeout=timeout)
+
+
+def get_telegram_status(openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> dict:
+    """Whether Telegram is configured at all, and its current dmPolicy —
+    read straight from `channels.telegram`, the same path
+    connect_telegram_channel writes to. Surfacing this (rather than only
+    showing it right after a successful connect) matters because a bot
+    can sit fully configured with dmPolicy="pairing" and nobody's pending
+    approvals ever get checked — the UI otherwise gives no hint that a
+    "no reply" report might just mean the sender was never approved."""
+    data = _run_openclaw_json(["config", "get", "channels.telegram", "--json"], openclaw_binary=openclaw_binary, timeout=timeout)
+    data = data or {}
+    configured = bool(data.get("enabled")) or bool(data.get("botToken"))
+    return {"configured": configured, "dm_policy": data.get("dmPolicy") or "pairing"}
 
 
 def bind_agent_to_telegram(agent_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:

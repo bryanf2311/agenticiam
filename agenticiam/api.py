@@ -1019,6 +1019,14 @@ def create_app(db_path=None) -> Flask:
         )
         return jsonify(updated)
 
+    @app.get("/v1/admin/openclaw/telegram/status")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_telegram_status():
+        try:
+            return jsonify(openclaw.get_telegram_status())
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+
     @app.post("/v1/admin/openclaw/agents/<agent_id>/telegram")
     @require_permission(ADMIN_PERMISSION)
     def openclaw_connect_agent_telegram(agent_id):

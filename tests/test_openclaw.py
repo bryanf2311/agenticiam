@@ -1,5 +1,4 @@
 import json
-import os
 
 import pytest
 
@@ -447,42 +446,32 @@ def test_tool_catalog_groups_cover_expected_tools():
 # ---------------------------------------------------------------- Telegram
 
 
-def test_connect_telegram_channel_uses_token_file_not_argv(monkeypatch):
-    # The token must never appear as a bare CLI argument (visible via
-    # `ps aux` / Task Manager's command-line column for as long as the
-    # subprocess runs) — it goes through a --token-file instead.
+def test_connect_telegram_channel_uses_token_flag_directly(monkeypatch):
+    # NOT --token-file: a real field report showed it persists as a
+    # `tokenFile` config pointer (not a one-time read) that takes priority
+    # over `botToken` even when stale — this module previously deleted its
+    # own temp file right after the command ran, orphaning that reference
+    # and silently breaking the channel on the next config read/restart.
+    # --token writes the token inline as `botToken`, no dangling reference.
     calls = []
-    written_token = {}
 
     def fake_run(cmd, capture_output, text, timeout, **kwargs):
         calls.append(cmd)
-        if cmd[1:3] == ["channels", "add"]:
-            token_file = cmd[cmd.index("--token-file") + 1]
-            written_token["value"] = open(token_file, encoding="utf-8").read()
-            written_token["path"] = token_file
         return _FakeCompletedProcess(returncode=0, stdout="")
 
     monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
     openclaw.connect_telegram_channel("sk-fake-bot-token", openclaw_binary="openclaw")
-    assert calls[0] == ["openclaw", "channels", "add", "--channel", "telegram", "--token-file", written_token["path"]]
-    assert written_token["value"] == "sk-fake-bot-token"
-    assert not os.path.exists(written_token["path"])  # cleaned up after
-    assert "sk-fake-bot-token" not in [arg for c in calls for arg in c]
+    assert calls[0] == ["openclaw", "channels", "add", "--channel", "telegram", "--token", "sk-fake-bot-token"]
+    assert not any("--token-file" in c for c in calls)
 
 
-def test_connect_telegram_channel_removes_temp_file_even_on_failure(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, capture_output, text, timeout, **kwargs):
-        if cmd[1:3] == ["channels", "add"]:
-            captured["path"] = cmd[cmd.index("--token-file") + 1]
-            return _FakeCompletedProcess(returncode=1, stdout="", stderr="bad token")
-        return _FakeCompletedProcess(returncode=0, stdout="")
-
-    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+def test_connect_telegram_channel_failure_propagates(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout="", stderr="bad token"),
+    )
     with pytest.raises(openclaw.OpenClawCliError, match="bad token"):
         openclaw.connect_telegram_channel("sk-fake-bot-token", openclaw_binary="openclaw")
-    assert not os.path.exists(captured["path"])
 
 
 def test_connect_telegram_channel_default_pairing_policy(monkeypatch):
@@ -517,6 +506,29 @@ def test_connect_telegram_channel_open_policy_sets_allow_from_wildcard(monkeypat
 def test_connect_telegram_channel_rejects_invalid_dm_policy():
     with pytest.raises(ValueError, match="dm_policy"):
         openclaw.connect_telegram_channel("tok", dm_policy="whatever")
+
+
+def test_get_telegram_status_configured_with_dm_policy(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            returncode=0, stdout=json.dumps({"enabled": True, "botToken": "sk-xxx", "dmPolicy": "open"})
+        ),
+    )
+    assert openclaw.get_telegram_status(openclaw_binary="openclaw") == {"configured": True, "dm_policy": "open"}
+
+
+def test_get_telegram_status_not_configured(monkeypatch):
+    monkeypatch.setattr(openclaw.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=""))
+    assert openclaw.get_telegram_status(openclaw_binary="openclaw") == {"configured": False, "dm_policy": "pairing"}
+
+
+def test_get_telegram_status_defaults_dm_policy_to_pairing_when_configured_but_unset(monkeypatch):
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=json.dumps({"botToken": "sk-xxx"})),
+    )
+    assert openclaw.get_telegram_status(openclaw_binary="openclaw") == {"configured": True, "dm_policy": "pairing"}
 
 
 def test_bind_agent_to_telegram(monkeypatch):

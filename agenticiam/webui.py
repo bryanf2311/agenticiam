@@ -412,8 +412,12 @@ async function renderWizardStep3() {
   body.innerHTML = 'Loading…';
   let existingAgents = [];
   let existingGroups = [];
+  let telegramStatus = null;
   try { existingAgents = await api('/v1/admin/identities?kind=agent'); } catch (err) { /* per-agent target list just won't show; wildcard checkbox still works */ }
   try { existingGroups = await api('/v1/admin/groups'); } catch (err) { /* group field still works, just no autocomplete */ }
+  if (wizardState.target === 'openclaw') {
+    try { telegramStatus = await api('/v1/admin/openclaw/telegram/status'); } catch (err) { /* status just won't show */ }
+  }
 
   const groupSection = `
     <h3 style="margin-top:26px">Group (optional)</h3>
@@ -442,9 +446,14 @@ async function renderWizardStep3() {
         </label>`).join('')}
     </div>` : '<p class="hint">No other agents exist yet to dispatch to individually — create this one first, then grant it dispatch rights to specific agents later from the Roles tab, or just use the wildcard above.</p>'}`;
 
+  const telegramStatusNote = telegramStatus && telegramStatus.configured
+    ? `<p class="hint">Telegram is already connected here, currently set to <span class="mono">${esc(telegramStatus.dm_policy)}</span>${telegramStatus.dm_policy === 'pairing' ? ' — only the bot owner gets replies until others are approved with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ' — anyone can message it, no approval needed'}. Connecting again below re-registers the same bot (safe) and, once you run the create-agent command, moves <strong>all</strong> Telegram routing to "${esc(wizardState.name)}" — away from whatever agent currently handles it.</p>`
+    : (telegramStatus ? '<p class="hint">No Telegram bot connected yet on this server.</p>' : '');
+
   const telegramSection = wizardState.target === 'openclaw' ? `
     <h3 style="margin-top:26px">Telegram (optional)</h3>
     <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> in Telegram (message it, run <span class="mono">/newbot</span>) to connect this bot right now — no restart needed. The generated "Create the OpenClaw agent persona" command in the next steps will route Telegram to "${esc(wizardState.name)}" the moment you run it.</p>
+    ${telegramStatusNote}
     <label>Bot token</label>
     <input id="wiz-telegram-token" type="password" value="${esc(wizardState.telegramToken)}" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
     <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
@@ -832,6 +841,11 @@ async function renderOpenclawAgentDetail(agentId) {
     const sandbox = cfg.sandbox || {};
     const docker = sandbox.docker || {};
     const binds = docker.binds || [];
+    let telegramStatus = null;
+    try { telegramStatus = await api('/v1/admin/openclaw/telegram/status'); } catch (err) { /* status just won't show */ }
+    const telegramStatusNote = telegramStatus && telegramStatus.configured
+      ? `<p class="hint">Telegram is already connected here, currently set to <span class="mono">${esc(telegramStatus.dm_policy)}</span>${telegramStatus.dm_policy === 'pairing' ? ' — only the bot owner gets replies until others are approved with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ' — anyone can message it, no approval needed'}. Connecting below re-registers the same bot (safe) and immediately moves <strong>all</strong> Telegram routing to "${esc(agentId)}" — away from whatever agent currently handles it, if different.</p>`
+      : (telegramStatus ? '<p class="hint">No Telegram bot connected yet on this server.</p>' : '');
     detail.innerHTML = `
       <h3>${esc(agentId)}</h3>
       <h4>Tool permissions</h4>
@@ -872,6 +886,7 @@ async function renderOpenclawAgentDetail(agentId) {
       <div id="openclaw-detail-msg"></div>
       <h4 style="margin-top:20px">Connect Telegram</h4>
       <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> to connect it and route all Telegram traffic to "${esc(agentId)}" immediately — no restart needed.</p>
+      ${telegramStatusNote}
       <label>Bot token</label>
       <input id="openclaw-telegram-token" type="password" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
       <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
