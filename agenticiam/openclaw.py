@@ -42,12 +42,25 @@ GitHub docs source), not guessed:
   self-hosted /v1/chat/completions-shaped backends (which is what
   ollama.com's hosted API is) — set non-destructively via
   `openclaw config set models.providers.<id> '<json>' --strict-json --merge`.
+- `openclaw channels add --channel telegram --token-file <path>` registers
+  a bot token non-interactively and — per OpenClaw's own docs — asks a
+  reachable local Gateway to start the account immediately, no restart
+  needed. `channels.telegram.dmPolicy` ("pairing" by default: the bot
+  owner can use it right away, anyone else needs a one-time
+  `openclaw pairing approve telegram <code>`; "open" with
+  `allowFrom: ["*"]` skips that approval for everyone) lives at the same
+  config path handled by _config_set_verified.
+- `openclaw agents bind --agent <id> --bind telegram:*` routes all
+  Telegram traffic to a specific, already-existing agent;
+  `openclaw agents add ... --bind telegram:*` does the same thing at
+  creation time in one step, for a brand new agent.
 """
 
 import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for callers)
@@ -277,6 +290,62 @@ def set_website_allowlist(hostnames: list, openclaw_binary: str = None, timeout:
     )
 
 
+TELEGRAM_DM_POLICIES = ("pairing", "open")
+
+
+def connect_telegram_channel(
+    token: str, dm_policy: str = "pairing", openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+) -> None:
+    """Registers a BotFather token with OpenClaw and starts it — per
+    OpenClaw's own docs, `channels add` "asks a reachable local Gateway to
+    start the account" right away, no restart needed, so the bot is live
+    on Telegram as soon as this returns.
+
+    Uses --token-file, not --token: passing the token as a plain CLI
+    argument would put it in argv, visible to anything else on this
+    machine that can list processes (`ps aux`, Task Manager's command-line
+    column) for as long as the subprocess runs. OpenClaw's CLI accepts a
+    file instead, so a short-lived temp file is used and removed right
+    after (tempfile.mkstemp is 0600 / owner-only on POSIX by default).
+
+    dm_policy="pairing" (OpenClaw's own default) means only the bot owner
+    can use it immediately; anyone else needs a one-time
+    `openclaw pairing approve telegram <code>`. dm_policy="open" also sets
+    allowFrom: ["*"] so nobody needs approval — see docs.openclaw.ai/
+    channels/telegram for the tradeoff.
+    """
+    if dm_policy not in TELEGRAM_DM_POLICIES:
+        raise ValueError(f"dm_policy must be one of {TELEGRAM_DM_POLICIES}")
+    fd, path = tempfile.mkstemp(prefix="agenticiam-telegram-token-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        _run_openclaw(
+            ["channels", "add", "--channel", "telegram", "--token-file", path],
+            openclaw_binary=openclaw_binary, timeout=timeout,
+        )
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if dm_policy == "open":
+        _config_set_verified("channels.telegram.dmPolicy", "open", openclaw_binary=openclaw_binary, timeout=timeout)
+        _config_set_verified("channels.telegram.allowFrom", ["*"], openclaw_binary=openclaw_binary, timeout=timeout)
+    else:
+        _config_set_verified("channels.telegram.dmPolicy", "pairing", openclaw_binary=openclaw_binary, timeout=timeout)
+
+
+def bind_agent_to_telegram(agent_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:
+    """Routes all Telegram traffic to an already-existing agent. For an
+    agent that doesn't exist yet, pass bind_telegram=True to
+    agent_add_command instead — `agents add ... --bind telegram:*` does
+    both in the one command the user runs to create it."""
+    _run_openclaw(
+        ["agents", "bind", "--agent", agent_id, "--bind", "telegram:*"], openclaw_binary=openclaw_binary, timeout=timeout
+    )
+
+
 def install_commands() -> dict:
     """One-time OpenClaw install + onboarding + verification commands."""
     return {
@@ -330,15 +399,27 @@ def mcp_add_commands(name: str, cmd: str, args: list, token: str) -> dict:
 _PROVIDER_ID_OVERRIDES = {"ollama_cloud": OLLAMA_CLOUD_PROVIDER_ID}
 
 
-def agent_add_command(name: str, provider: str, model: str) -> dict:
+def agent_add_command(name: str, provider: str, model: str, bind_telegram: bool = False) -> dict:
     """`openclaw agents add` invocation that creates the persona (workspace,
     session store, model) — the OpenClaw equivalent of Goose's `goose
-    session -n <name>` / `goose run --recipe ...` launch command."""
+    session -n <name>` / `goose run --recipe ...` launch command.
+
+    bind_telegram=True appends `--bind telegram:*`: since this command is
+    the one the user actually runs to bring the new agent into existence
+    (still copy-paste — OpenClaw agent creation isn't run directly the way
+    Telegram channel registration is; see connect_telegram_channel), it's
+    also the earliest point a not-yet-existing agent *can* be bound to a
+    channel. connect_telegram_channel already made the bot live pointing
+    at OpenClaw's default agent by the time this command gets run; running
+    it hands Telegram routing over to this new agent in the same step,
+    with no separate `agents bind` call needed."""
     slug = slugify(name)
     openclaw_provider = _PROVIDER_ID_OVERRIDES.get(provider, provider)
     model_ref = f"{openclaw_provider}/{model}" if openclaw_provider and model else model
     ws = workspace_path(name)
     cmd = f'openclaw agents add {slug} --model "{model_ref}" --non-interactive --workspace "{ws}"'
+    if bind_telegram:
+        cmd += " --bind telegram:*"
     return {"bash": cmd, "powershell": cmd, "cmd": cmd}
 
 

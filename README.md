@@ -329,6 +329,41 @@ Two things worth knowing:
   `openclaw agents list` to remove the persona if you no longer want its
   workspace/session history.
 
+### Telegram (OpenClaw target only)
+
+Step 3 has an optional "Telegram" section: paste a bot token from
+`@BotFather` (message it in Telegram, run `/newbot`) and the bot connects
+*immediately* — this is the one piece of the OpenClaw flow AgenticIAM runs
+directly rather than generating a command for, because `openclaw channels
+add --channel telegram --token-file <path>` asks a reachable local Gateway
+to start the account right away, no restart needed (the token goes through
+a short-lived temp file, not a `--token` CLI argument, so it's never
+visible in a process listing). It's live pointing at OpenClaw's default
+agent the moment you submit the wizard — before you've even copied the
+create-agent command in step 5.
+
+The one remaining copy-paste step (creating the OpenClaw agent itself —
+still not run directly; see above) gets `--bind telegram:*` appended
+automatically when Telegram was connected, so running that single command
+both brings the new agent into existence *and* hands Telegram routing over
+to it — no separate `openclaw agents bind` call needed.
+
+Access control: OpenClaw's default DM policy is `"pairing"` — you (the bot
+owner) can use it immediately, but anyone else's first message gets a
+pairing code you approve with `openclaw pairing approve telegram <code>`.
+The wizard's "let anyone message the bot immediately" checkbox switches
+this to `"open"` (sets `allowFrom: ["*"]`) instead — a public bot with no
+approval step, your call per bot.
+
+Already have an OpenClaw agent (created outside the wizard, or from an
+earlier session)? The **OpenClaw Agents tab** has the same "Connect
+Telegram" action per agent — since that agent already exists, both the
+token registration *and* the bind happen directly, no copy-paste at all.
+
+If the token or the bind fails, the agent identity itself is still created
+(or, from the Agents tab, the agent is left as it was) — the error is
+surfaced rather than losing the rest of the work.
+
 ## Teams (groups)
 
 Groups are AgenticIAM's existing security-group primitive (see the web

@@ -244,6 +244,7 @@ function resetWizard() {
     contextLimit: '', permissions: [], customPermissions: '',
     dispatchWildcard: false, dispatchTargets: [], group: '',
     setDefault: false, cmd: '', args: '', result: null,
+    telegramToken: '', telegramOpenDm: false,
   };
 }
 
@@ -441,6 +442,16 @@ async function renderWizardStep3() {
         </label>`).join('')}
     </div>` : '<p class="hint">No other agents exist yet to dispatch to individually — create this one first, then grant it dispatch rights to specific agents later from the Roles tab, or just use the wildcard above.</p>'}`;
 
+  const telegramSection = wizardState.target === 'openclaw' ? `
+    <h3 style="margin-top:26px">Telegram (optional)</h3>
+    <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> in Telegram (message it, run <span class="mono">/newbot</span>) to connect this bot right now — no restart needed. The generated "Create the OpenClaw agent persona" command in the next steps will route Telegram to "${esc(wizardState.name)}" the moment you run it.</p>
+    <label>Bot token</label>
+    <input id="wiz-telegram-token" type="password" value="${esc(wizardState.telegramToken)}" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+    <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+      <input type="checkbox" id="wiz-telegram-open" ${wizardState.telegramOpenDm ? 'checked' : ''} style="width:auto">
+      <span>Let anyone message the bot immediately (default: only you can, until you approve others with <span class="mono">openclaw pairing approve</span>)</span>
+    </label>` : '';
+
   body.innerHTML = `
     <div class="panel">
       <h3>Step 3 of 4 — Permissions</h3>
@@ -454,6 +465,7 @@ async function renderWizardStep3() {
       <input id="wiz-custom-perms" value="${esc(wizardState.customPermissions)}">
       ${groupSection}
       ${managerSection}
+      ${telegramSection}
       <div class="submit-row row">
         <button class="secondary" id="wiz-back">Back</button>
         <button id="wiz-next">Next</button>
@@ -478,6 +490,10 @@ async function renderWizardStep3() {
     wizardState.group = document.getElementById('wiz-group').value.trim();
     wizardState.dispatchWildcard = wildcardCb ? wildcardCb.checked : false;
     wizardState.dispatchTargets = Array.from(body.querySelectorAll('.wiz-dispatch-target:checked')).map(i => i.value);
+    const telegramTokenInput = document.getElementById('wiz-telegram-token');
+    wizardState.telegramToken = telegramTokenInput ? telegramTokenInput.value.trim() : '';
+    const telegramOpenCb = document.getElementById('wiz-telegram-open');
+    wizardState.telegramOpenDm = telegramOpenCb ? telegramOpenCb.checked : false;
     wizardStep = 4; renderWizard();
   });
 }
@@ -545,6 +561,8 @@ function renderWizardStep4() {
         group: wizardState.group || undefined,
         set_as_default: wizardState.setDefault,
         auto_configure_ollama_cloud: wizardState.autoConfigureOllamaCloud,
+        telegram_token: wizardState.telegramToken || undefined,
+        telegram_dm_policy: wizardState.telegramOpenDm ? 'open' : 'pairing',
         cmd: wizardState.cmd,
         args: wizardState.args.split(/\\s+/).filter(Boolean),
       } });
@@ -580,12 +598,19 @@ function renderWizardStep5() {
             : `<div class="err">Couldn't write SOUL.md: ${esc(r.manager_soul_error)}. The agent was still created, but you'll need to paste the system prompt into its workspace's SOUL.md by hand — see docs/manager-system-prompt.md.</div>`))
     : '';
 
+  const telegramNote = r.telegram
+    ? (r.telegram.connected
+        ? `<p class="ok">Telegram bot connected and live now (dm policy: <span class="mono">${esc(r.telegram.dm_policy)}</span>)${r.telegram.dm_policy === 'pairing' ? ' — you can message it right away; anyone else needs a one-time approval with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ''}. It's currently routed to OpenClaw's default agent — running the "Create the OpenClaw agent persona" command below hands routing over to "${esc(r.identity.name)}" in the same step (it already includes <span class="mono">--bind telegram:*</span>).</p>`
+        : `<div class="err">Couldn't connect the Telegram bot: ${esc(r.telegram.error)}. The agent was still created — you can retry from the OpenClaw Agents tab once it exists, or add <span class="mono">--bind telegram:*</span> to the create-agent command below by hand after connecting it via <span class="mono">openclaw channels add --channel telegram --token-file &lt;path&gt;</span>.</div>`)
+    : '';
+
   if (r.target === 'openclaw') {
     body.innerHTML = `
       <div class="panel">
         <h3>Agent created</h3>
         <p class="ok">"${esc(r.identity.name)}" is ready.${r.group ? ` Added to group "${esc(r.group)}".` : ''}</p>
         ${managerNote}
+        ${telegramNote}
         <p class="hint">Run ${r.openclaw_commands.register_cloud_provider ? 'these three commands' : 'these two commands'} (same machine as the OpenClaw Gateway), in order, to finish wiring it up:</p>
         ${r.openclaw_commands.register_cloud_provider ? `
         <label>1. ${esc(r.openclaw_commands.register_cloud_provider.title)}</label>
@@ -844,7 +869,17 @@ async function renderOpenclawAgentDetail(agentId) {
       <p class="hint">One bind per line: <span class="mono">/host/path:/container/path:ro</span> or <span class="mono">:rw</span>. Only these paths are reachable inside the sandbox.</p>
       <textarea id="openclaw-binds" rows="4">${esc(binds.join('\\n'))}</textarea>
       <div class="submit-row"><button id="openclaw-save-permissions">Save permissions</button></div>
-      <div id="openclaw-detail-msg"></div>`;
+      <div id="openclaw-detail-msg"></div>
+      <h4 style="margin-top:20px">Connect Telegram</h4>
+      <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> to connect it and route all Telegram traffic to "${esc(agentId)}" immediately — no restart needed.</p>
+      <label>Bot token</label>
+      <input id="openclaw-telegram-token" type="password" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+        <input type="checkbox" id="openclaw-telegram-open" style="width:auto">
+        <span>Let anyone message the bot immediately (default: only you can, until you approve others with <span class="mono">openclaw pairing approve</span>)</span>
+      </label>
+      <div class="submit-row"><button id="openclaw-telegram-connect">Connect</button></div>
+      <div id="openclaw-telegram-msg"></div>`;
     document.getElementById('openclaw-save-permissions').addEventListener('click', async () => {
       const msg = document.getElementById('openclaw-detail-msg');
       msg.innerHTML = '';
@@ -869,6 +904,19 @@ async function renderOpenclawAgentDetail(agentId) {
       try {
         await api('/v1/admin/openclaw/agents/' + encodeURIComponent(agentId) + '/permissions', { method: 'PUT', json: payload });
         msg.innerHTML = '<div class="ok">Saved.</div>';
+      } catch (err) { msg.innerHTML = errBox(err); }
+    });
+    document.getElementById('openclaw-telegram-connect').addEventListener('click', async () => {
+      const msg = document.getElementById('openclaw-telegram-msg');
+      const token = document.getElementById('openclaw-telegram-token').value.trim();
+      if (!token) { msg.innerHTML = '<div class="err">Paste a bot token first.</div>'; return; }
+      const dmPolicy = document.getElementById('openclaw-telegram-open').checked ? 'open' : 'pairing';
+      msg.innerHTML = 'Connecting…';
+      try {
+        await api('/v1/admin/openclaw/agents/' + encodeURIComponent(agentId) + '/telegram', {
+          method: 'POST', json: { token, dm_policy: dmPolicy },
+        });
+        msg.innerHTML = `<div class="ok">Connected and live — Telegram is now routed to "${esc(agentId)}".${dmPolicy === 'pairing' ? ' You can message it right away; anyone else needs a one-time approval with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>.' : ''}</div>`;
       } catch (err) { msg.innerHTML = errBox(err); }
     });
   } catch (err) { detail.innerHTML = errBox(err); }

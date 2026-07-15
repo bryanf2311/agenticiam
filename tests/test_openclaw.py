@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -35,6 +36,18 @@ def test_agent_add_command_uses_provider_slash_model_ref():
         assert '--model "ollama/llama3.1:8b"' in variant
         assert "--non-interactive" in variant
         assert "--workspace" in variant
+
+
+def test_agent_add_command_bind_telegram_appends_flag():
+    commands = openclaw.agent_add_command("boss", "ollama", "llama3.1:8b", bind_telegram=True)
+    for variant in commands.values():
+        assert variant.endswith("--bind telegram:*")
+
+
+def test_agent_add_command_no_telegram_flag_by_default():
+    commands = openclaw.agent_add_command("boss", "ollama", "llama3.1:8b")
+    for variant in commands.values():
+        assert "telegram" not in variant
 
 
 def test_agent_add_command_maps_ollama_cloud_to_openclaw_provider_id():
@@ -429,3 +442,90 @@ def test_tool_catalog_groups_cover_expected_tools():
     assert "browser" in openclaw.TOOL_CATALOG["Web access"]
     assert "read" in openclaw.TOOL_CATALOG["File access"]
     assert "write" in openclaw.TOOL_CATALOG["File access"]
+
+
+# ---------------------------------------------------------------- Telegram
+
+
+def test_connect_telegram_channel_uses_token_file_not_argv(monkeypatch):
+    # The token must never appear as a bare CLI argument (visible via
+    # `ps aux` / Task Manager's command-line column for as long as the
+    # subprocess runs) — it goes through a --token-file instead.
+    calls = []
+    written_token = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["channels", "add"]:
+            token_file = cmd[cmd.index("--token-file") + 1]
+            written_token["value"] = open(token_file, encoding="utf-8").read()
+            written_token["path"] = token_file
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.connect_telegram_channel("sk-fake-bot-token", openclaw_binary="openclaw")
+    assert calls[0] == ["openclaw", "channels", "add", "--channel", "telegram", "--token-file", written_token["path"]]
+    assert written_token["value"] == "sk-fake-bot-token"
+    assert not os.path.exists(written_token["path"])  # cleaned up after
+    assert "sk-fake-bot-token" not in [arg for c in calls for arg in c]
+
+
+def test_connect_telegram_channel_removes_temp_file_even_on_failure(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        if cmd[1:3] == ["channels", "add"]:
+            captured["path"] = cmd[cmd.index("--token-file") + 1]
+            return _FakeCompletedProcess(returncode=1, stdout="", stderr="bad token")
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    with pytest.raises(openclaw.OpenClawCliError, match="bad token"):
+        openclaw.connect_telegram_channel("sk-fake-bot-token", openclaw_binary="openclaw")
+    assert not os.path.exists(captured["path"])
+
+
+def test_connect_telegram_channel_default_pairing_policy(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.connect_telegram_channel("tok", openclaw_binary="openclaw")
+    dm_policy_call = next(c for c in calls if c[1:3] == ["config", "set"] and c[3] == "channels.telegram.dmPolicy")
+    assert dm_policy_call[4] == json.dumps("pairing")
+    assert not any(c[3] == "channels.telegram.allowFrom" for c in calls if c[1:3] == ["config", "set"])
+
+
+def test_connect_telegram_channel_open_policy_sets_allow_from_wildcard(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.connect_telegram_channel("tok", dm_policy="open", openclaw_binary="openclaw")
+    dm_policy_call = next(c for c in calls if c[1:3] == ["config", "set"] and c[3] == "channels.telegram.dmPolicy")
+    allow_from_call = next(c for c in calls if c[1:3] == ["config", "set"] and c[3] == "channels.telegram.allowFrom")
+    assert dm_policy_call[4] == json.dumps("open")
+    assert allow_from_call[4] == json.dumps(["*"])
+
+
+def test_connect_telegram_channel_rejects_invalid_dm_policy():
+    with pytest.raises(ValueError, match="dm_policy"):
+        openclaw.connect_telegram_channel("tok", dm_policy="whatever")
+
+
+def test_bind_agent_to_telegram(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.bind_agent_to_telegram("boss", openclaw_binary="openclaw")
+    assert captured["cmd"] == ["openclaw", "agents", "bind", "--agent", "boss", "--bind", "telegram:*"]

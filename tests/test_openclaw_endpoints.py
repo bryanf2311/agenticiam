@@ -186,3 +186,82 @@ def test_tool_catalog_endpoint(client, admin_headers):
     resp = client.get("/v1/admin/openclaw/tool-catalog", headers=admin_headers)
     body = resp.get_json()
     assert "browser" in body["Web access"]
+
+
+def test_connect_agent_telegram_requires_token(client, admin_headers):
+    resp = client.post("/v1/admin/openclaw/agents/boss/telegram", json={}, headers=admin_headers)
+    assert resp.status_code == 400
+
+
+def test_connect_agent_telegram_rejects_invalid_dm_policy(client, admin_headers):
+    resp = client.post(
+        "/v1/admin/openclaw/agents/boss/telegram", json={"token": "tok", "dm_policy": "whatever"}, headers=admin_headers
+    )
+    assert resp.status_code == 400
+
+
+def test_connect_agent_telegram_success(client, admin_headers, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        openclaw, "connect_telegram_channel",
+        lambda token, dm_policy="pairing": calls.setdefault("connect", (token, dm_policy)),
+    )
+    monkeypatch.setattr(openclaw, "bind_agent_to_telegram", lambda agent_id: calls.setdefault("bind", agent_id))
+    resp = client.post(
+        "/v1/admin/openclaw/agents/boss/telegram", json={"token": "sk-fake-bot-token"}, headers=admin_headers
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"channel_connected": True, "agent_bound": True, "dm_policy": "pairing"}
+    assert calls["connect"] == ("sk-fake-bot-token", "pairing")
+    assert calls["bind"] == "boss"
+
+
+def test_connect_agent_telegram_channel_failure_does_not_attempt_bind(client, admin_headers, monkeypatch):
+    def raise_error(token, dm_policy="pairing"):
+        raise openclaw.OpenClawCliError("bad token")
+
+    monkeypatch.setattr(openclaw, "connect_telegram_channel", raise_error)
+
+    def fail_if_called(agent_id):
+        raise AssertionError("must not attempt bind if the channel never connected")
+
+    monkeypatch.setattr(openclaw, "bind_agent_to_telegram", fail_if_called)
+    resp = client.post(
+        "/v1/admin/openclaw/agents/boss/telegram", json={"token": "sk-fake-bot-token"}, headers=admin_headers
+    )
+    assert resp.status_code == 502
+    body = resp.get_json()
+    assert body["channel_connected"] is False
+    assert body["agent_bound"] is False
+    assert body["error"] == "bad token"
+
+
+def test_connect_agent_telegram_bind_failure_after_channel_succeeds(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(openclaw, "connect_telegram_channel", lambda token, dm_policy="pairing": None)
+
+    def raise_error(agent_id):
+        raise openclaw.OpenClawCliError("no OpenClaw agent with id 'boss'")
+
+    monkeypatch.setattr(openclaw, "bind_agent_to_telegram", raise_error)
+    resp = client.post(
+        "/v1/admin/openclaw/agents/boss/telegram", json={"token": "sk-fake-bot-token"}, headers=admin_headers
+    )
+    assert resp.status_code == 502
+    body = resp.get_json()
+    assert body["channel_connected"] is True
+    assert body["agent_bound"] is False
+
+
+def test_connect_agent_telegram_open_policy(client, admin_headers, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        openclaw, "connect_telegram_channel",
+        lambda token, dm_policy="pairing": calls.setdefault("dm_policy", dm_policy),
+    )
+    monkeypatch.setattr(openclaw, "bind_agent_to_telegram", lambda agent_id: None)
+    resp = client.post(
+        "/v1/admin/openclaw/agents/boss/telegram", json={"token": "tok", "dm_policy": "open"}, headers=admin_headers
+    )
+    assert resp.status_code == 200
+    assert calls["dm_policy"] == "open"
+    assert resp.get_json()["dm_policy"] == "open"
