@@ -549,3 +549,119 @@ def test_bind_agent_to_telegram(monkeypatch):
     monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
     openclaw.bind_agent_to_telegram("boss", openclaw_binary="openclaw")
     assert captured["cmd"] == ["openclaw", "agents", "bind", "--agent", "boss", "--bind", "telegram:*"]
+
+
+# ---------------------------------------------------------------- multiple Telegram bots
+
+
+@pytest.fixture
+def telegram_bots_path(tmp_path, monkeypatch):
+    path = tmp_path / "openclaw-telegram-bots.yaml"
+    monkeypatch.setattr(openclaw.paths, "telegram_bots_path", lambda: path)
+    return path
+
+
+def test_load_telegram_bot_names_missing_file_returns_empty(telegram_bots_path):
+    assert openclaw.load_telegram_bot_names() == {}
+
+
+def test_save_and_load_telegram_bot_names_round_trip(telegram_bots_path):
+    openclaw.save_telegram_bot_names({"bot-one": "Sales Bot"})
+    assert openclaw.load_telegram_bot_names() == {"bot-one": "Sales Bot"}
+
+
+def test_save_telegram_bot_names_backs_up_existing_file(telegram_bots_path):
+    openclaw.save_telegram_bot_names({"bot-one": "Sales Bot"})
+    openclaw.save_telegram_bot_names({"bot-one": "Sales Bot", "bot-two": "Support Bot"})
+    backups = list(telegram_bots_path.parent.glob("*.bak-*"))
+    assert len(backups) == 1
+
+
+def test_list_telegram_bots_uses_real_channels_list_shape(monkeypatch, telegram_bots_path):
+    # Real, verified output from `openclaw channels list --json`:
+    # {"chat": {"telegram": {"accounts": ["default"], "installed": true,
+    # "origin": "configured"}}} — bare account-id strings, no name/token.
+    monkeypatch.setattr(
+        openclaw.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            returncode=0,
+            stdout=json.dumps({"chat": {"telegram": {"accounts": ["default", "bot-two"], "installed": True, "origin": "configured"}}}),
+        ),
+    )
+    openclaw.save_telegram_bot_names({"bot-two": "Support Bot"})
+    result = openclaw.list_telegram_bots(openclaw_binary="openclaw")
+    assert result == [{"id": "default", "name": "default"}, {"id": "bot-two", "name": "Support Bot"}]
+
+
+def test_list_telegram_bots_no_telegram_channel_configured(monkeypatch, telegram_bots_path):
+    monkeypatch.setattr(openclaw.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=""))
+    assert openclaw.list_telegram_bots(openclaw_binary="openclaw") == []
+
+
+def test_add_or_update_telegram_bot_slugifies_name_and_saves_locally(monkeypatch, telegram_bots_path):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    account_id = openclaw.add_or_update_telegram_bot("Support Bot", "sk-fake-token", openclaw_binary="openclaw")
+    assert account_id == "support-bot"
+    assert captured["cmd"] == [
+        "openclaw", "channels", "add", "--channel", "telegram",
+        "--account", "support-bot", "--name", "Support Bot", "--token", "sk-fake-token",
+    ]
+    assert openclaw.load_telegram_bot_names() == {"support-bot": "Support Bot"}
+
+
+def test_add_or_update_telegram_bot_reuses_explicit_account_id_to_update(monkeypatch, telegram_bots_path):
+    # Confirmed via `openclaw channels add --help`: the command is
+    # "Add or update a channel account" — re-running it with the same
+    # --account id replaces the token in place, no separate rotate call.
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.add_or_update_telegram_bot("Support Bot", "sk-old-token", account_id="support-bot", openclaw_binary="openclaw")
+    openclaw.add_or_update_telegram_bot("Support Bot", "sk-new-token", account_id="support-bot", openclaw_binary="openclaw")
+    assert len(calls) == 2
+    assert calls[0][-1] == "sk-old-token"
+    assert calls[1][-1] == "sk-new-token"
+    assert calls[0][calls[0].index("--account") + 1] == calls[1][calls[1].index("--account") + 1] == "support-bot"
+
+
+def test_remove_telegram_bot_deletes_config_and_local_name(monkeypatch, telegram_bots_path):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.save_telegram_bot_names({"support-bot": "Support Bot", "sales-bot": "Sales Bot"})
+    openclaw.remove_telegram_bot("support-bot", openclaw_binary="openclaw")
+    assert captured["cmd"] == [
+        "openclaw", "channels", "remove", "--channel", "telegram", "--account", "support-bot", "--delete",
+    ]
+    assert openclaw.load_telegram_bot_names() == {"sales-bot": "Sales Bot"}
+
+
+def test_remove_telegram_bot_missing_local_name_does_not_error(monkeypatch, telegram_bots_path):
+    monkeypatch.setattr(openclaw.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout=""))
+    openclaw.remove_telegram_bot("never-named", openclaw_binary="openclaw")  # must not raise
+
+
+def test_bind_agent_to_telegram_account_targets_specific_account(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(returncode=0, stdout="")
+
+    monkeypatch.setattr(openclaw.subprocess, "run", fake_run)
+    openclaw.bind_agent_to_telegram_account("boss", "support-bot", openclaw_binary="openclaw")
+    assert captured["cmd"] == ["openclaw", "agents", "bind", "--agent", "boss", "--bind", "telegram:support-bot"]

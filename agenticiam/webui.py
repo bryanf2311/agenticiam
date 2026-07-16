@@ -194,7 +194,8 @@ function showLogin() {
 
 const SECTIONS = [
   ['setup', 'Setup'], ['identities', 'Identities'], ['groups', 'Groups'], ['roles', 'Roles'],
-  ['keys', 'Tokens & Keys'], ['mcp', 'MCP / Agent Setup'], ['openclaw', 'OpenClaw Agents'], ['audit', 'Audit Log'],
+  ['keys', 'Tokens & Keys'], ['mcp', 'MCP / Agent Setup'], ['openclaw', 'OpenClaw Agents'],
+  ['telegrambots', 'Telegram Bots'], ['audit', 'Audit Log'],
 ];
 let currentSection = 'identities';
 
@@ -226,7 +227,7 @@ function selectSection(id) {
   document.querySelectorAll('#section-links a[data-section]').forEach(a => a.classList.toggle('active', a.dataset.section === id));
   const renderers = {
     setup: renderSetup, identities: renderIdentities, groups: renderGroups, roles: renderRoles, keys: renderKeys,
-    mcp: renderMcp, openclaw: renderOpenclaw, audit: renderAudit, newagent: renderWizard,
+    mcp: renderMcp, openclaw: renderOpenclaw, telegrambots: renderTelegramBots, audit: renderAudit, newagent: renderWizard,
   };
   renderers[id]();
 }
@@ -935,6 +936,111 @@ async function renderOpenclawAgentDetail(agentId) {
       } catch (err) { msg.innerHTML = errBox(err); }
     });
   } catch (err) { detail.innerHTML = errBox(err); }
+}
+
+let telegramBotsEditingAccountId = null;
+
+async function renderTelegramBots() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<h2>Telegram Bots</h2><div id="content">Loading…</div>';
+  const content = document.getElementById('content');
+  try {
+    const status = await api('/v1/admin/goose/status');
+    if (!status.openclaw_installed) {
+      content.innerHTML = `<div class="panel">
+        <p class="err">OpenClaw is not installed on this server.</p>
+        <p class="hint">See the <a href="#" id="telegrambots-goto-setup">Setup</a> tab for install commands.</p>
+      </div>`;
+      const link = document.getElementById('telegrambots-goto-setup');
+      if (link) link.addEventListener('click', (e) => { e.preventDefault(); selectSection('setup'); });
+      return;
+    }
+    let botsRes, telegramStatus, agents;
+    try { botsRes = await api('/v1/admin/openclaw/telegram/bots'); }
+    catch (err) { content.innerHTML = errBox(err); return; }
+    try { telegramStatus = await api('/v1/admin/openclaw/telegram/status'); } catch (err) { telegramStatus = null; }
+    try { agents = await api('/v1/admin/identities?kind=agent'); } catch (err) { agents = []; }
+    const bots = botsRes.bots;
+    const editing = telegramBotsEditingAccountId ? bots.find(b => b.id === telegramBotsEditingAccountId) : null;
+
+    content.innerHTML = `
+      <p class="hint">Every bot you connect here is its own <span class="mono">@BotFather</span> token, independently routable to a different agent — one Telegram bot per agent, or several bots feeding the same one. Adding a bot with the same name as an existing one updates its token rather than creating a duplicate.</p>
+      ${telegramStatus && telegramStatus.configured ? `<p class="hint">DM policy (shared by <strong>every</strong> bot below — OpenClaw has no per-bot setting for this): <span class="mono">${esc(telegramStatus.dm_policy)}</span>${telegramStatus.dm_policy === 'pairing' ? ' — only you get replies until you approve others with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ' — anyone can message any bot below, no approval needed'}.</p>` : ''}
+      <table><thead><tr><th>Name</th><th>Account id</th><th>Bind to agent</th><th></th></tr></thead>
+      <tbody>${bots.map(b => `
+        <tr>
+          <td>${esc(b.name)}</td>
+          <td class="mono">${esc(b.id)}</td>
+          <td>
+            <select class="telegrambot-agent-select" data-bot="${esc(b.id)}">
+              <option value="">Select agent…</option>
+              ${agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}
+            </select>
+            <button class="secondary" data-bind="${esc(b.id)}">Bind</button>
+          </td>
+          <td class="actions">
+            <button class="secondary" data-edit="${esc(b.id)}">Update token</button>
+            <button class="danger" data-remove="${esc(b.id)}">Remove</button>
+          </td>
+        </tr>`).join('') || '<tr><td class="hint" colspan="4">No Telegram bots connected yet.</td></tr>'}</tbody></table>
+      <div id="telegrambots-bind-msg"></div>
+      <div class="panel">
+        <h3>${editing ? `Update token for "${esc(editing.name)}"` : 'Add a bot'}</h3>
+        <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> in Telegram (message it, run <span class="mono">/newbot</span>). Connects immediately — no restart needed.</p>
+        <label>Name</label>
+        <input id="telegrambot-name" value="${esc(editing ? editing.name : '')}" placeholder="Support Bot" ${editing ? 'readonly' : ''}>
+        <label>Bot token</label>
+        <input id="telegrambot-token" type="password" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+        <div class="submit-row row">
+          ${editing ? '<button class="secondary" id="telegrambot-cancel-edit">Cancel</button>' : ''}
+          <button id="telegrambot-save">${editing ? 'Update token' : 'Add bot'}</button>
+        </div>
+        <div id="telegrambot-save-msg"></div>
+      </div>`;
+
+    content.querySelectorAll('button[data-bind]').forEach(btn => btn.addEventListener('click', async () => {
+      const msg = document.getElementById('telegrambots-bind-msg');
+      const select = content.querySelector(`select[data-bot="${btn.dataset.bind}"]`);
+      const agentId = select.value;
+      if (!agentId) { msg.innerHTML = '<div class="err">Pick an agent first.</div>'; return; }
+      msg.innerHTML = 'Binding…';
+      try {
+        await api('/v1/admin/openclaw/telegram/bots/' + encodeURIComponent(btn.dataset.bind) + '/bind', {
+          method: 'POST', json: { agent_id: agentId },
+        });
+        msg.innerHTML = `<div class="ok">"${esc(btn.dataset.bind)}" is now routed to "${esc(agentId)}".</div>`;
+      } catch (err) { msg.innerHTML = errBox(err); }
+    }));
+    content.querySelectorAll('button[data-remove]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('Remove Telegram bot "' + btn.dataset.remove + '"? This deletes it from OpenClaw entirely — anyone messaging it will get no reply until it\\'s reconnected.')) return;
+      try {
+        await api('/v1/admin/openclaw/telegram/bots/' + encodeURIComponent(btn.dataset.remove), { method: 'DELETE' });
+        if (telegramBotsEditingAccountId === btn.dataset.remove) telegramBotsEditingAccountId = null;
+        renderTelegramBots();
+      } catch (err) { alert(err.message); }
+    }));
+    content.querySelectorAll('button[data-edit]').forEach(btn => btn.addEventListener('click', () => {
+      telegramBotsEditingAccountId = btn.dataset.edit;
+      renderTelegramBots();
+    }));
+    const cancelBtn = document.getElementById('telegrambot-cancel-edit');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => { telegramBotsEditingAccountId = null; renderTelegramBots(); });
+    document.getElementById('telegrambot-save').addEventListener('click', async () => {
+      const msg = document.getElementById('telegrambot-save-msg');
+      const name = document.getElementById('telegrambot-name').value.trim();
+      const token = document.getElementById('telegrambot-token').value.trim();
+      if (!name) { msg.innerHTML = '<div class="err">Enter a name.</div>'; return; }
+      if (!token) { msg.innerHTML = '<div class="err">Paste a bot token.</div>'; return; }
+      msg.innerHTML = 'Saving…';
+      try {
+        const payload = { name, token };
+        if (telegramBotsEditingAccountId) payload.account_id = telegramBotsEditingAccountId;
+        await api('/v1/admin/openclaw/telegram/bots', { method: 'POST', json: payload });
+        telegramBotsEditingAccountId = null;
+        renderTelegramBots();
+      } catch (err) { msg.innerHTML = errBox(err); }
+    });
+  } catch (err) { content.innerHTML = errBox(err); }
 }
 
 async function renderIdentities() {

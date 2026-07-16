@@ -1061,6 +1061,73 @@ def create_app(db_path=None) -> Flask:
         )
         return jsonify(result)
 
+    @app.get("/v1/admin/openclaw/telegram/bots")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_list_telegram_bots():
+        try:
+            return jsonify({"bots": openclaw.list_telegram_bots()})
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+
+    @app.post("/v1/admin/openclaw/telegram/bots")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_add_telegram_bot():
+        data = request.get_json(force=True)
+        name = (data.get("name") or "").strip()
+        token = (data.get("token") or "").strip()
+        if not name:
+            return jsonify({"error": "invalid_request", "error_description": "name is required"}), 400
+        if not token:
+            return jsonify({"error": "invalid_request", "error_description": "token is required"}), 400
+        account_id = (data.get("account_id") or "").strip() or None
+        try:
+            saved_id = openclaw.add_or_update_telegram_bot(name, token, account_id=account_id)
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+        actor = _actor()
+        audit.log(
+            get_directory().conn, "openclaw.add_telegram_bot", "success",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            resource=f"telegram-bot:{saved_id}",
+            detail={"name": name},
+        )
+        return jsonify({"id": saved_id, "name": name}), 201
+
+    @app.delete("/v1/admin/openclaw/telegram/bots/<account_id>")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_remove_telegram_bot(account_id):
+        try:
+            openclaw.remove_telegram_bot(account_id)
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+        actor = _actor()
+        audit.log(
+            get_directory().conn, "openclaw.remove_telegram_bot", "success",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            resource=f"telegram-bot:{account_id}",
+        )
+        return "", 204
+
+    @app.post("/v1/admin/openclaw/telegram/bots/<account_id>/bind")
+    @require_permission(ADMIN_PERMISSION)
+    def openclaw_bind_telegram_bot(account_id):
+        data = request.get_json(force=True)
+        agent_id = (data.get("agent_id") or "").strip()
+        if not agent_id:
+            return jsonify({"error": "invalid_request", "error_description": "agent_id is required"}), 400
+        try:
+            openclaw.bind_agent_to_telegram_account(agent_id, account_id)
+        except openclaw.OpenClawCliError as exc:
+            return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
+        actor = _actor()
+        audit.log(
+            get_directory().conn, "openclaw.bind_telegram_bot", "success",
+            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
+            resource=f"telegram-bot:{account_id}",
+            detail={"agent_id": agent_id},
+        )
+        return jsonify({"account_id": account_id, "agent_id": agent_id})
+
     @app.get("/v1/admin/openclaw/website-allowlist")
     @require_permission(ADMIN_PERMISSION)
     def openclaw_get_website_allowlist():

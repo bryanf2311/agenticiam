@@ -63,8 +63,12 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
+import yaml
+
+from . import paths
 from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for callers)
 
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
@@ -360,6 +364,101 @@ def bind_agent_to_telegram(agent_id: str, openclaw_binary: str = None, timeout: 
     both in the one command the user runs to create it."""
     _run_openclaw(
         ["agents", "bind", "--agent", agent_id, "--bind", "telegram:*"], openclaw_binary=openclaw_binary, timeout=timeout
+    )
+
+
+# ---------------------------------------------------------------- multiple Telegram bots
+#
+# OpenClaw supports more than one Telegram bot at once, each its own
+# "account" under channels.telegram.accounts.<id>, independently bindable
+# to a different agent (confirmed: `openclaw channels add --help` shows
+# --account/--name/--token; a real run of `openclaw channels list --json`
+# returned `{"chat": {"telegram": {"accounts": ["default"], "installed":
+# true, "origin": "configured"}}}` — bare account-id strings, no name or
+# token surfaced; `openclaw channels remove --help` confirms --account
+# and --delete). AgenticIAM keeps the human-friendly display name itself
+# (telegram_bots_path, next to goose's secrets.yaml in spirit) since
+# OpenClaw's own CLI has nowhere confirmed to read one back from.
+
+
+def load_telegram_bot_names() -> dict:
+    path = paths.telegram_bots_path()
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data or {}
+
+
+def save_telegram_bot_names(names: dict) -> Path:
+    path = paths.telegram_bots_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_suffix(f".yaml.bak-{int(time.time())}")
+        shutil.copy2(path, backup)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(names, f, default_flow_style=False, sort_keys=False)
+    return path
+
+
+def list_telegram_bots(openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> list:
+    """Every configured Telegram bot account: id (OpenClaw's) + display
+    name (AgenticIAM's own bookkeeping, falling back to the id itself for
+    an account that exists in OpenClaw but was never named through here —
+    e.g. the "default" account from the single-bot Telegram flow)."""
+    data = _run_openclaw_json(["channels", "list", "--json"], openclaw_binary=openclaw_binary, timeout=timeout) or {}
+    account_ids = ((data.get("chat") or {}).get("telegram") or {}).get("accounts") or []
+    names = load_telegram_bot_names()
+    return [{"id": account_id, "name": names.get(account_id, account_id)} for account_id in account_ids]
+
+
+def add_or_update_telegram_bot(
+    name: str, token: str, account_id: str = None, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+) -> str:
+    """Registers a new named Telegram bot, or — running this again with
+    the same account_id — replaces its token in place. Confirmed via
+    `openclaw channels add --help`: the command's own description is
+    "Add or update a channel account", and its telegram example is
+    literally captioned "Add or update Telegram non-interactively" — no
+    separate rotate/update command exists or is needed. Returns the
+    account id (slugified from name if not given explicitly, so the same
+    name always maps back to the same account for a later update)."""
+    account_id = account_id or slugify(name)
+    _run_openclaw(
+        ["channels", "add", "--channel", "telegram", "--account", account_id, "--name", name, "--token", token],
+        openclaw_binary=openclaw_binary, timeout=timeout,
+    )
+    names = load_telegram_bot_names()
+    names[account_id] = name
+    save_telegram_bot_names(names)
+    return account_id
+
+
+def remove_telegram_bot(account_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:
+    """Deletes a Telegram bot account entirely. --delete is required: per
+    `openclaw channels remove --help`, omitting it instead asks
+    interactively whether to just disable the account — which would hang
+    a non-interactive caller waiting on a prompt nobody can answer."""
+    _run_openclaw(
+        ["channels", "remove", "--channel", "telegram", "--account", account_id, "--delete"],
+        openclaw_binary=openclaw_binary, timeout=timeout,
+    )
+    names = load_telegram_bot_names()
+    if account_id in names:
+        del names[account_id]
+        save_telegram_bot_names(names)
+
+
+def bind_agent_to_telegram_account(
+    agent_id: str, account_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+) -> None:
+    """Routes just one Telegram bot's traffic to a specific agent —
+    `--bind <channel>:<accountId>` (confirmed against docs/cli/agents.md),
+    as opposed to bind_agent_to_telegram's `telegram:*` (every account).
+    Other bots' routing is untouched."""
+    _run_openclaw(
+        ["agents", "bind", "--agent", agent_id, "--bind", f"telegram:{account_id}"],
+        openclaw_binary=openclaw_binary, timeout=timeout,
     )
 
 

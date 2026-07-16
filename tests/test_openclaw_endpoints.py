@@ -155,6 +155,120 @@ def test_set_agent_permissions_surfaces_cli_error(client, admin_headers, monkeyp
     assert resp.status_code == 502
 
 
+def test_list_telegram_bots(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(
+        openclaw, "list_telegram_bots",
+        lambda: [{"id": "default", "name": "default"}, {"id": "support-bot", "name": "Support Bot"}],
+    )
+    resp = client.get("/v1/admin/openclaw/telegram/bots", headers=admin_headers)
+    assert resp.get_json() == {"bots": [{"id": "default", "name": "default"}, {"id": "support-bot", "name": "Support Bot"}]}
+
+
+def test_list_telegram_bots_surfaces_cli_error(client, admin_headers, monkeypatch):
+    def raise_error():
+        raise openclaw.OpenClawCliError("gateway not running")
+
+    monkeypatch.setattr(openclaw, "list_telegram_bots", raise_error)
+    resp = client.get("/v1/admin/openclaw/telegram/bots", headers=admin_headers)
+    assert resp.status_code == 502
+
+
+def test_add_telegram_bot_requires_name_and_token(client, admin_headers):
+    resp = client.post("/v1/admin/openclaw/telegram/bots", json={"token": "tok"}, headers=admin_headers)
+    assert resp.status_code == 400
+    resp = client.post("/v1/admin/openclaw/telegram/bots", json={"name": "Support Bot"}, headers=admin_headers)
+    assert resp.status_code == 400
+
+
+def test_add_telegram_bot_success(client, admin_headers, monkeypatch):
+    calls = {}
+
+    def fake_add(name, token, account_id=None):
+        calls["args"] = (name, token, account_id)
+        return "support-bot"
+
+    monkeypatch.setattr(openclaw, "add_or_update_telegram_bot", fake_add)
+    resp = client.post(
+        "/v1/admin/openclaw/telegram/bots", json={"name": "Support Bot", "token": "sk-fake"}, headers=admin_headers
+    )
+    assert resp.status_code == 201
+    assert resp.get_json() == {"id": "support-bot", "name": "Support Bot"}
+    assert calls["args"] == ("Support Bot", "sk-fake", None)
+
+
+def test_add_telegram_bot_passes_explicit_account_id(client, admin_headers, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        openclaw, "add_or_update_telegram_bot",
+        lambda name, token, account_id=None: calls.setdefault("account_id", account_id) or account_id,
+    )
+    resp = client.post(
+        "/v1/admin/openclaw/telegram/bots",
+        json={"name": "Support Bot", "token": "sk-fake", "account_id": "support-bot"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+    assert calls["account_id"] == "support-bot"
+
+
+def test_add_telegram_bot_surfaces_cli_error(client, admin_headers, monkeypatch):
+    def raise_error(name, token, account_id=None):
+        raise openclaw.OpenClawCliError("bad token")
+
+    monkeypatch.setattr(openclaw, "add_or_update_telegram_bot", raise_error)
+    resp = client.post(
+        "/v1/admin/openclaw/telegram/bots", json={"name": "Support Bot", "token": "sk-fake"}, headers=admin_headers
+    )
+    assert resp.status_code == 502
+
+
+def test_remove_telegram_bot(client, admin_headers, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(openclaw, "remove_telegram_bot", lambda account_id: calls.setdefault("account_id", account_id))
+    resp = client.delete("/v1/admin/openclaw/telegram/bots/support-bot", headers=admin_headers)
+    assert resp.status_code == 204
+    assert calls["account_id"] == "support-bot"
+
+
+def test_remove_telegram_bot_surfaces_cli_error(client, admin_headers, monkeypatch):
+    def raise_error(account_id):
+        raise openclaw.OpenClawCliError("no such account")
+
+    monkeypatch.setattr(openclaw, "remove_telegram_bot", raise_error)
+    resp = client.delete("/v1/admin/openclaw/telegram/bots/support-bot", headers=admin_headers)
+    assert resp.status_code == 502
+
+
+def test_bind_telegram_bot_requires_agent_id(client, admin_headers):
+    resp = client.post("/v1/admin/openclaw/telegram/bots/support-bot/bind", json={}, headers=admin_headers)
+    assert resp.status_code == 400
+
+
+def test_bind_telegram_bot_success(client, admin_headers, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        openclaw, "bind_agent_to_telegram_account",
+        lambda agent_id, account_id: calls.setdefault("args", (agent_id, account_id)),
+    )
+    resp = client.post(
+        "/v1/admin/openclaw/telegram/bots/support-bot/bind", json={"agent_id": "boss"}, headers=admin_headers
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"account_id": "support-bot", "agent_id": "boss"}
+    assert calls["args"] == ("boss", "support-bot")
+
+
+def test_bind_telegram_bot_surfaces_cli_error(client, admin_headers, monkeypatch):
+    def raise_error(agent_id, account_id):
+        raise openclaw.OpenClawCliError("no OpenClaw agent with id 'boss'")
+
+    monkeypatch.setattr(openclaw, "bind_agent_to_telegram_account", raise_error)
+    resp = client.post(
+        "/v1/admin/openclaw/telegram/bots/support-bot/bind", json={"agent_id": "boss"}, headers=admin_headers
+    )
+    assert resp.status_code == 502
+
+
 def test_get_website_allowlist(client, admin_headers, monkeypatch):
     monkeypatch.setattr(openclaw, "get_website_allowlist", lambda: ["example.com"])
     resp = client.get("/v1/admin/openclaw/website-allowlist", headers=admin_headers)

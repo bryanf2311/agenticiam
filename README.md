@@ -335,12 +335,10 @@ Step 3 has an optional "Telegram" section: paste a bot token from
 `@BotFather` (message it in Telegram, run `/newbot`) and the bot connects
 *immediately* — this is the one piece of the OpenClaw flow AgenticIAM runs
 directly rather than generating a command for, because `openclaw channels
-add --channel telegram --token-file <path>` asks a reachable local Gateway
-to start the account right away, no restart needed (the token goes through
-a short-lived temp file, not a `--token` CLI argument, so it's never
-visible in a process listing). It's live pointing at OpenClaw's default
-agent the moment you submit the wizard — before you've even copied the
-create-agent command in step 5.
+add --channel telegram --token <token>` asks a reachable local Gateway to
+start the account right away, no restart needed. It's live pointing at
+OpenClaw's default agent the moment you submit the wizard — before you've
+even copied the create-agent command in step 5.
 
 The one remaining copy-paste step (creating the OpenClaw agent itself —
 still not run directly; see above) gets `--bind telegram:*` appended
@@ -363,6 +361,53 @@ token registration *and* the bind happen directly, no copy-paste at all.
 If the token or the bind fails, the agent identity itself is still created
 (or, from the Agents tab, the agent is left as it was) — the error is
 surfaced rather than losing the rest of the work.
+
+### Telegram Bots tab: more than one bot, each its own agent
+
+OpenClaw supports several Telegram bots at once — each its own
+`@BotFather` token, independently routable to a different agent
+(`channels.telegram.accounts.<id>`, confirmed against a real
+`openclaw channels add --help`/`channels list --json`/`channels remove
+--help` on a live install, not guessed). The **Telegram Bots** tab is
+where you manage that:
+
+- **Add a bot**: name it and paste its token. Connects immediately
+  (`openclaw channels add --channel telegram --account <slug-of-name>
+  --name <name> --token <token>`), same as the wizard's Telegram step.
+- **Update a bot's token**: click "Update token" on an existing bot, paste
+  the new one, save. This re-runs the same `channels add` command against
+  the same account id — confirmed via `channels add --help` that the
+  command is literally "Add or update a channel account" (its own
+  Telegram example is captioned "Add or update Telegram
+  non-interactively"), so there's no separate rotate step and no
+  remove-then-re-add dance needed.
+- **Bind a bot to an agent**: pick an agent from the dropdown next to any
+  bot and click Bind (`openclaw agents bind --agent <id> --bind
+  telegram:<account>`) — routes just that one bot's traffic, leaving
+  every other bot's routing alone.
+- **Remove a bot**: deletes it from OpenClaw entirely (`openclaw channels
+  remove --channel telegram --account <id> --delete`) — asks for
+  confirmation first since it's not reversible from here.
+
+The display name shown here is AgenticIAM's own bookkeeping, not
+OpenClaw's — a real `channels list --json` only returns bare account-id
+strings, no name field to read back. If OpenClaw's own config ever
+disagrees with what's stored here (edited outside AgenticIAM, a fresh
+install, ...), a bot may show up under its raw account id until renamed.
+
+**DM policy is shared by every bot**, not per-bot — same `"pairing"` vs
+`"open"` tradeoff as the single-bot wizard flow, because OpenClaw's
+`channels.telegram.dmPolicy` isn't scoped by account. The tab surfaces the
+current value for context but doesn't let you set a different one per bot,
+since that setting doesn't actually exist per bot on OpenClaw's side.
+
+**One interaction worth knowing**: the wizard/Agents-tab "Connect
+Telegram" action binds with `telegram:*` — *every* account, not just the
+default one. If you also manage bots individually from this tab, running
+that wildcard bind again will silently move all of them (including ones
+you'd deliberately routed elsewhere) to whichever agent you just connected
+it to. Stick to per-bot binds from this tab once you have more than one
+bot connected.
 
 ## Teams (groups)
 

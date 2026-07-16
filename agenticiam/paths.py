@@ -29,3 +29,11 @@ def db_path() -> Path:
 
 def signing_key_path() -> Path:
     return data_dir() / "signing.key"
+
+
+def telegram_bots_path() -> Path:
+    """Display names for OpenClaw Telegram bot accounts — AgenticIAM's own
+    bookkeeping, not OpenClaw's: `openclaw channels list --json` returns
+    bare account ids with no name field (confirmed against real output),
+    so there's nothing to read a friendly name back from OpenClaw itself."""
+    return data_dir() / "openclaw-telegram-bots.yaml"
