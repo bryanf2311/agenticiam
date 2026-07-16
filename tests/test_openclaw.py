@@ -630,6 +630,35 @@ def test_add_or_update_telegram_bot_reuses_explicit_account_id_to_update(monkeyp
     assert calls[0][calls[0].index("--account") + 1] == calls[1][calls[1].index("--account") + 1] == "support-bot"
 
 
+def test_add_or_update_telegram_bot_recovers_from_timeout_when_bot_appears_in_list(monkeypatch, telegram_bots_path):
+    # Real field report: this call reported a timeout on *every* add,
+    # because unlike _config_set_verified it never checked whether the
+    # underlying `channels add` had actually succeeded — the same
+    # "does the work, doesn't exit cleanly" CLI quirk documented on
+    # _run_openclaw.
+    def fake_popen(cmd, **kwargs):
+        if cmd[1:3] == ["channels", "add"]:
+            return _FakePopen(timeout_then_output=("", ""))
+        return _FakePopen(returncode=0, stdout=json.dumps({"chat": {"telegram": {"accounts": ["support-bot"]}}}))
+
+    monkeypatch.setattr(openclaw.subprocess, "Popen", fake_popen)
+    account_id = openclaw.add_or_update_telegram_bot("Support Bot", "sk-fake-token", openclaw_binary="openclaw")
+    assert account_id == "support-bot"
+    assert openclaw.load_telegram_bot_names() == {"support-bot": "Support Bot"}
+
+
+def test_add_or_update_telegram_bot_reraises_timeout_when_bot_missing_from_list(monkeypatch, telegram_bots_path):
+    def fake_popen(cmd, **kwargs):
+        if cmd[1:3] == ["channels", "add"]:
+            return _FakePopen(timeout_then_output=("", ""))
+        return _FakePopen(returncode=0, stdout=json.dumps({"chat": {"telegram": {"accounts": []}}}))
+
+    monkeypatch.setattr(openclaw.subprocess, "Popen", fake_popen)
+    with pytest.raises(openclaw.OpenClawTimeoutError):
+        openclaw.add_or_update_telegram_bot("Support Bot", "sk-fake-token", openclaw_binary="openclaw")
+    assert openclaw.load_telegram_bot_names() == {}
+
+
 def test_remove_telegram_bot_deletes_config_and_local_name(monkeypatch, telegram_bots_path):
     captured = {}
 
@@ -644,6 +673,31 @@ def test_remove_telegram_bot_deletes_config_and_local_name(monkeypatch, telegram
         "openclaw", "channels", "remove", "--channel", "telegram", "--account", "support-bot", "--delete",
     ]
     assert openclaw.load_telegram_bot_names() == {"sales-bot": "Sales Bot"}
+
+
+def test_remove_telegram_bot_recovers_from_timeout_when_bot_gone_from_list(monkeypatch, telegram_bots_path):
+    def fake_popen(cmd, **kwargs):
+        if cmd[1:3] == ["channels", "remove"]:
+            return _FakePopen(timeout_then_output=("", ""))
+        return _FakePopen(returncode=0, stdout=json.dumps({"chat": {"telegram": {"accounts": []}}}))
+
+    monkeypatch.setattr(openclaw.subprocess, "Popen", fake_popen)
+    openclaw.save_telegram_bot_names({"support-bot": "Support Bot"})
+    openclaw.remove_telegram_bot("support-bot", openclaw_binary="openclaw")
+    assert openclaw.load_telegram_bot_names() == {}
+
+
+def test_remove_telegram_bot_reraises_timeout_when_bot_still_in_list(monkeypatch, telegram_bots_path):
+    def fake_popen(cmd, **kwargs):
+        if cmd[1:3] == ["channels", "remove"]:
+            return _FakePopen(timeout_then_output=("", ""))
+        return _FakePopen(returncode=0, stdout=json.dumps({"chat": {"telegram": {"accounts": ["support-bot"]}}}))
+
+    monkeypatch.setattr(openclaw.subprocess, "Popen", fake_popen)
+    openclaw.save_telegram_bot_names({"support-bot": "Support Bot"})
+    with pytest.raises(openclaw.OpenClawTimeoutError):
+        openclaw.remove_telegram_bot("support-bot", openclaw_binary="openclaw")
+    assert openclaw.load_telegram_bot_names() == {"support-bot": "Support Bot"}
 
 
 def test_remove_telegram_bot_missing_local_name_does_not_error(monkeypatch, telegram_bots_path):

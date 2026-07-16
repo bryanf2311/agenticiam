@@ -458,10 +458,21 @@ def add_or_update_telegram_bot(
     account id (slugified from name if not given explicitly, so the same
     name always maps back to the same account for a later update)."""
     account_id = account_id or slugify(name)
-    _run_openclaw(
-        ["channels", "add", "--channel", "telegram", "--account", account_id, "--name", name, "--token", token],
-        openclaw_binary=openclaw_binary, timeout=timeout,
-    )
+    try:
+        _run_openclaw(
+            ["channels", "add", "--channel", "telegram", "--account", account_id, "--name", name, "--token", token],
+            openclaw_binary=openclaw_binary, timeout=timeout,
+        )
+    except OpenClawTimeoutError:
+        # Same underlying quirk _config_set_verified works around (see its
+        # docstring): this openclaw build's CLI commands reliably finish
+        # their real work even when the process itself doesn't exit in
+        # time — a real field report showed this exact call reporting a
+        # timeout on *every* add, because unlike _config_set_verified this
+        # function never checked. Verify with a fresh `channels list`
+        # instead of trusting the timeout at face value.
+        if account_id not in {b["id"] for b in list_telegram_bots(openclaw_binary=openclaw_binary, timeout=timeout)}:
+            raise
     names = load_telegram_bot_names()
     names[account_id] = name
     save_telegram_bot_names(names)
@@ -473,10 +484,16 @@ def remove_telegram_bot(account_id: str, openclaw_binary: str = None, timeout: f
     `openclaw channels remove --help`, omitting it instead asks
     interactively whether to just disable the account — which would hang
     a non-interactive caller waiting on a prompt nobody can answer."""
-    _run_openclaw(
-        ["channels", "remove", "--channel", "telegram", "--account", account_id, "--delete"],
-        openclaw_binary=openclaw_binary, timeout=timeout,
-    )
+    try:
+        _run_openclaw(
+            ["channels", "remove", "--channel", "telegram", "--account", account_id, "--delete"],
+            openclaw_binary=openclaw_binary, timeout=timeout,
+        )
+    except OpenClawTimeoutError:
+        # See add_or_update_telegram_bot: verify via a fresh read instead
+        # of trusting the timeout, same underlying CLI quirk.
+        if account_id in {b["id"] for b in list_telegram_bots(openclaw_binary=openclaw_binary, timeout=timeout)}:
+            raise
     names = load_telegram_bot_names()
     if account_id in names:
         del names[account_id]
