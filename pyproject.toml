@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agenticiam"
+version = "0.1.0"
+description = "A self-hosted, Active-Directory-like identity, directory, and permission gateway for AI agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "flask>=3.0,<4.0",
+    "click>=8.1,<9.0",
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+agenticiam = "agenticiam.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agenticiam*"]
