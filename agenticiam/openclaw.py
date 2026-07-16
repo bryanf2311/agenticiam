@@ -85,7 +85,7 @@ from .goose import MANAGER_SYSTEM_PROMPT, slugify  # noqa: F401 (re-exported for
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 OLLAMA_CLOUD_PROVIDER_ID = "ollama-cloud"
 
-DEFAULT_CLI_TIMEOUT = 30.0
+DEFAULT_CLI_TIMEOUT = 120.0
 
 # Real, confirmed-against-docs tool ids OpenClaw's `agents.list[].tools.allow`
 # / `.deny` gate applies to — grouped for the permissions UI. "Web access"
