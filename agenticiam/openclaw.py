@@ -137,7 +137,21 @@ def _kill_process_tree(pid: int) -> None:
     equals its pid and the whole group goes down together.
     """
     if os.name == "nt":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        # A real field report: after this shipped, both the OpenClaw Agents
+        # and Telegram Bots tabs started timing out far more than before —
+        # this call had no timeout of its own, so a slow/stuck taskkill (AV
+        # interference, permissions, a loaded machine) could block the
+        # whole request indefinitely instead of the caller's own timeout
+        # ever being hit. Python's native process.kill() (what shipped
+        # before this function existed) is a near-instant syscall with
+        # nothing to hang on; spawning taskkill as a subprocess introduced
+        # a second, previously-nonexistent way to stall. Bounded and
+        # best-effort: if even the kill itself won't finish quickly, give
+        # up rather than compounding the original timeout.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     else:
         try:
             os.killpg(pid, signal.SIGKILL)
