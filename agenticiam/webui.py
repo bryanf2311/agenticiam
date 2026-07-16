@@ -245,7 +245,7 @@ function resetWizard() {
     contextLimit: '', permissions: [], customPermissions: '',
     dispatchWildcard: false, dispatchTargets: [], group: '',
     setDefault: false, cmd: '', args: '', result: null,
-    telegramToken: '', telegramOpenDm: false,
+    telegramToken: '', telegramOpenDm: false, telegramBotName: '',
   };
 }
 
@@ -448,13 +448,15 @@ async function renderWizardStep3() {
     </div>` : '<p class="hint">No other agents exist yet to dispatch to individually — create this one first, then grant it dispatch rights to specific agents later from the Roles tab, or just use the wildcard above.</p>'}`;
 
   const telegramStatusNote = telegramStatus && telegramStatus.configured
-    ? `<p class="hint">Telegram is already connected here, currently set to <span class="mono">${esc(telegramStatus.dm_policy)}</span>${telegramStatus.dm_policy === 'pairing' ? ' — only the bot owner gets replies until others are approved with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ' — anyone can message it, no approval needed'}. Connecting again below re-registers the same bot (safe) and, once you run the create-agent command, moves <strong>all</strong> Telegram routing to "${esc(wizardState.name)}" — away from whatever agent currently handles it.</p>`
-    : (telegramStatus ? '<p class="hint">No Telegram bot connected yet on this server.</p>' : '');
+    ? `<p class="hint">Telegram's dm policy on this server is currently <span class="mono">${esc(telegramStatus.dm_policy)}</span>${telegramStatus.dm_policy === 'pairing' ? ' — only a bot\\'s owner gets replies until others are approved with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ' — anyone can message a connected bot, no approval needed'} (shared by every bot, not just this one). See the <a href="#" id="wiz-goto-telegrambots">Telegram Bots</a> tab to see or manage bots you\\'ve already connected.</p>`
+    : '';
 
   const telegramSection = wizardState.target === 'openclaw' ? `
     <h3 style="margin-top:26px">Telegram (optional)</h3>
-    <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> in Telegram (message it, run <span class="mono">/newbot</span>) to connect this bot right now — no restart needed. The generated "Create the OpenClaw agent persona" command in the next steps will route Telegram to "${esc(wizardState.name)}" the moment you run it.</p>
+    <p class="hint">Give this bot a name and paste its token from <span class="mono">@BotFather</span> in Telegram (message it, run <span class="mono">/newbot</span>) to connect it right now — no restart needed. The generated "Create the OpenClaw agent persona" command in the next steps will route this specific bot to "${esc(wizardState.name)}" the moment you run it, without touching any other bot's routing.</p>
     ${telegramStatusNote}
+    <label>Bot name</label>
+    <input id="wiz-telegram-name" value="${esc(wizardState.telegramBotName || wizardState.name)}" placeholder="${esc(wizardState.name) || 'Support Bot'}">
     <label>Bot token</label>
     <input id="wiz-telegram-token" type="password" value="${esc(wizardState.telegramToken)}" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
     <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
@@ -494,16 +496,21 @@ async function renderWizardStep3() {
       list.style.pointerEvents = e.target.checked ? 'none' : 'auto';
     });
   }
+  const telegramGotoTab = document.getElementById('wiz-goto-telegrambots');
+  if (telegramGotoTab) telegramGotoTab.addEventListener('click', (e) => { e.preventDefault(); selectSection('telegrambots'); });
   document.getElementById('wiz-next').addEventListener('click', () => {
     wizardState.permissions = Array.from(body.querySelectorAll('.wiz-perm-checkbox:checked')).map(i => i.value);
     wizardState.customPermissions = document.getElementById('wiz-custom-perms').value;
     wizardState.group = document.getElementById('wiz-group').value.trim();
     wizardState.dispatchWildcard = wildcardCb ? wildcardCb.checked : false;
     wizardState.dispatchTargets = Array.from(body.querySelectorAll('.wiz-dispatch-target:checked')).map(i => i.value);
+    const telegramNameInput = document.getElementById('wiz-telegram-name');
+    wizardState.telegramBotName = telegramNameInput ? telegramNameInput.value.trim() : '';
     const telegramTokenInput = document.getElementById('wiz-telegram-token');
     wizardState.telegramToken = telegramTokenInput ? telegramTokenInput.value.trim() : '';
     const telegramOpenCb = document.getElementById('wiz-telegram-open');
     wizardState.telegramOpenDm = telegramOpenCb ? telegramOpenCb.checked : false;
+    if (wizardState.telegramToken && !wizardState.telegramBotName) { alert('Give the Telegram bot a name, or clear its token to skip connecting one.'); return; }
     wizardStep = 4; renderWizard();
   });
 }
@@ -572,6 +579,7 @@ function renderWizardStep4() {
         set_as_default: wizardState.setDefault,
         auto_configure_ollama_cloud: wizardState.autoConfigureOllamaCloud,
         telegram_token: wizardState.telegramToken || undefined,
+        telegram_bot_name: wizardState.telegramBotName || undefined,
         telegram_dm_policy: wizardState.telegramOpenDm ? 'open' : 'pairing',
         cmd: wizardState.cmd,
         args: wizardState.args.split(/\\s+/).filter(Boolean),
@@ -610,8 +618,8 @@ function renderWizardStep5() {
 
   const telegramNote = r.telegram
     ? (r.telegram.connected
-        ? `<p class="ok">Telegram bot connected and live now (dm policy: <span class="mono">${esc(r.telegram.dm_policy)}</span>)${r.telegram.dm_policy === 'pairing' ? ' — you can message it right away; anyone else needs a one-time approval with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ''}. It's currently routed to OpenClaw's default agent — running the "Create the OpenClaw agent persona" command below hands routing over to "${esc(r.identity.name)}" in the same step (it already includes <span class="mono">--bind telegram:*</span>).</p>`
-        : `<div class="err">Couldn't connect the Telegram bot: ${esc(r.telegram.error)}. The agent was still created — you can retry from the OpenClaw Agents tab once it exists, or add <span class="mono">--bind telegram:*</span> to the create-agent command below by hand after connecting it via <span class="mono">openclaw channels add --channel telegram --token-file &lt;path&gt;</span>.</div>`)
+        ? `<p class="ok">Telegram bot "<span class="mono">${esc(r.telegram.account_id)}</span>" connected and live now (dm policy: <span class="mono">${esc(r.telegram.dm_policy)}</span>)${r.telegram.dm_policy === 'pairing' ? ' — you can message it right away; anyone else needs a one-time approval with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ''}. It's currently routed to OpenClaw's default agent — running the "Create the OpenClaw agent persona" command below hands this specific bot's routing over to "${esc(r.identity.name)}" in the same step (it already includes <span class="mono">--bind telegram:${esc(r.telegram.account_id)}</span>), without touching any other bot.</p>`
+        : `<div class="err">Couldn't connect the Telegram bot: ${esc(r.telegram.error)}. The agent was still created — you can retry from the Telegram Bots tab once it exists.</div>`)
     : '';
 
   if (r.target === 'openclaw') {
@@ -842,11 +850,6 @@ async function renderOpenclawAgentDetail(agentId) {
     const sandbox = cfg.sandbox || {};
     const docker = sandbox.docker || {};
     const binds = docker.binds || [];
-    let telegramStatus = null;
-    try { telegramStatus = await api('/v1/admin/openclaw/telegram/status'); } catch (err) { /* status just won't show */ }
-    const telegramStatusNote = telegramStatus && telegramStatus.configured
-      ? `<p class="hint">Telegram is already connected here, currently set to <span class="mono">${esc(telegramStatus.dm_policy)}</span>${telegramStatus.dm_policy === 'pairing' ? ' — only the bot owner gets replies until others are approved with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>' : ' — anyone can message it, no approval needed'}. Connecting below re-registers the same bot (safe) and immediately moves <strong>all</strong> Telegram routing to "${esc(agentId)}" — away from whatever agent currently handles it, if different.</p>`
-      : (telegramStatus ? '<p class="hint">No Telegram bot connected yet on this server.</p>' : '');
     detail.innerHTML = `
       <h3>${esc(agentId)}</h3>
       <h4>Tool permissions</h4>
@@ -885,17 +888,8 @@ async function renderOpenclawAgentDetail(agentId) {
       <textarea id="openclaw-binds" rows="4">${esc(binds.join('\\n'))}</textarea>
       <div class="submit-row"><button id="openclaw-save-permissions">Save permissions</button></div>
       <div id="openclaw-detail-msg"></div>
-      <h4 style="margin-top:20px">Connect Telegram</h4>
-      <p class="hint">Paste a bot token from <span class="mono">@BotFather</span> to connect it and route all Telegram traffic to "${esc(agentId)}" immediately — no restart needed.</p>
-      ${telegramStatusNote}
-      <label>Bot token</label>
-      <input id="openclaw-telegram-token" type="password" placeholder="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
-      <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
-        <input type="checkbox" id="openclaw-telegram-open" style="width:auto">
-        <span>Let anyone message the bot immediately (default: only you can, until you approve others with <span class="mono">openclaw pairing approve</span>)</span>
-      </label>
-      <div class="submit-row"><button id="openclaw-telegram-connect">Connect</button></div>
-      <div id="openclaw-telegram-msg"></div>`;
+      <h4 style="margin-top:20px">Telegram</h4>
+      <p class="hint">Connect a bot and route it to "${esc(agentId)}" from the <a href="#" id="openclaw-goto-telegrambots">Telegram Bots</a> tab — it lets you name the bot and, later, update its token without disturbing any other bot's routing.</p>`;
     document.getElementById('openclaw-save-permissions').addEventListener('click', async () => {
       const msg = document.getElementById('openclaw-detail-msg');
       msg.innerHTML = '';
@@ -922,19 +916,8 @@ async function renderOpenclawAgentDetail(agentId) {
         msg.innerHTML = '<div class="ok">Saved.</div>';
       } catch (err) { msg.innerHTML = errBox(err); }
     });
-    document.getElementById('openclaw-telegram-connect').addEventListener('click', async () => {
-      const msg = document.getElementById('openclaw-telegram-msg');
-      const token = document.getElementById('openclaw-telegram-token').value.trim();
-      if (!token) { msg.innerHTML = '<div class="err">Paste a bot token first.</div>'; return; }
-      const dmPolicy = document.getElementById('openclaw-telegram-open').checked ? 'open' : 'pairing';
-      msg.innerHTML = 'Connecting…';
-      try {
-        await api('/v1/admin/openclaw/agents/' + encodeURIComponent(agentId) + '/telegram', {
-          method: 'POST', json: { token, dm_policy: dmPolicy },
-        });
-        msg.innerHTML = `<div class="ok">Connected and live — Telegram is now routed to "${esc(agentId)}".${dmPolicy === 'pairing' ? ' You can message it right away; anyone else needs a one-time approval with <span class="mono">openclaw pairing approve telegram &lt;code&gt;</span>.' : ''}</div>`;
-      } catch (err) { msg.innerHTML = errBox(err); }
-    });
+    const telegramGotoTab = document.getElementById('openclaw-goto-telegrambots');
+    if (telegramGotoTab) telegramGotoTab.addEventListener('click', (e) => { e.preventDefault(); selectSection('telegrambots'); });
   } catch (err) { detail.innerHTML = errBox(err); }
 }
 

@@ -745,13 +745,26 @@ def create_app(db_path=None) -> Flask:
         # Telegram is an OpenClaw-only concept (a chat channel the gateway
         # connects to) — meaningless for target=="goose", silently ignored
         # there rather than erroring, same treatment as auto_configure_ollama_cloud.
-        telegram_token = (data.get("telegram_token") or "").strip() or None
+        # telegram_bot_name is required whenever a token is given — there's
+        # no implicit "default account" fallback here (see openclaw.py's
+        # module docstring for why: a real, reported problem with an
+        # earlier version that had one).
+        telegram_token = None
+        telegram_bot_name = None
         telegram_dm_policy = (data.get("telegram_dm_policy") or "pairing").strip()
-        if telegram_token and telegram_dm_policy not in openclaw.TELEGRAM_DM_POLICIES:
-            return jsonify({
-                "error": "invalid_request",
-                "error_description": f"telegram_dm_policy must be one of {openclaw.TELEGRAM_DM_POLICIES}",
-            }), 400
+        if target == "openclaw":
+            telegram_token = (data.get("telegram_token") or "").strip() or None
+            telegram_bot_name = (data.get("telegram_bot_name") or "").strip() or None
+        if telegram_token:
+            if not telegram_bot_name:
+                return jsonify({
+                    "error": "invalid_request", "error_description": "telegram_bot_name is required when telegram_token is given",
+                }), 400
+            if telegram_dm_policy not in openclaw.TELEGRAM_DM_POLICIES:
+                return jsonify({
+                    "error": "invalid_request",
+                    "error_description": f"telegram_dm_policy must be one of {openclaw.TELEGRAM_DM_POLICIES}",
+                }), 400
 
         # A "manager" isn't a hardcoded role — it's just an agent that was
         # granted dispatch: permissions in the wizard's "Manager
@@ -850,7 +863,7 @@ def create_app(db_path=None) -> Flask:
             "group": group_name,
             "is_manager": is_manager,
         }
-        telegram_connected = False
+        telegram_account_id = None
         telegram_error = None
 
         if target == "goose":
@@ -895,20 +908,23 @@ def create_app(db_path=None) -> Flask:
             # (openclaw mcp add / openclaw agents add) — we generate the
             # commands rather than writing openclaw.json ourselves.
             #
-            # Telegram is the one exception: connect_telegram_channel is run
-            # directly (right here, not generated as a command) because
+            # Telegram is the one exception: add_or_update_telegram_bot is
+            # run directly (right here, not generated as a command) because
             # `openclaw channels add` asks a reachable local Gateway to start
             # the account immediately — the bot goes live on Telegram before
             # the user has even copied the create_agent command below. That
             # command still needs to be run by hand (it's the one that
-            # brings the new OpenClaw agent itself into existence), so
-            # bind_telegram=True is folded into it — running it both creates
-            # the agent and hands Telegram routing over to it in one step,
-            # rather than requiring a separate `agents bind` afterward.
+            # brings the new OpenClaw agent itself into existence), so the
+            # resulting account id is folded into it as telegram_account_id
+            # — running it both creates the agent and hands routing for
+            # that one specific bot over to it in one step, rather than
+            # requiring a separate `agents bind` afterward. Always a named,
+            # specific account — never an implicit default — per this
+            # module's own past incident (see openclaw.py's docstring).
             if telegram_token:
                 try:
-                    openclaw.connect_telegram_channel(telegram_token, dm_policy=telegram_dm_policy)
-                    telegram_connected = True
+                    telegram_account_id = openclaw.add_or_update_telegram_bot(telegram_bot_name, telegram_token)
+                    openclaw.set_telegram_dm_policy(telegram_dm_policy)
                 except openclaw.OpenClawCliError as exc:
                     telegram_error = str(exc)
 
@@ -924,14 +940,15 @@ def create_app(db_path=None) -> Flask:
             }
             openclaw_commands["create_agent"] = {
                 "title": "Create the OpenClaw agent persona",
-                **openclaw.agent_add_command(name, provider, model, bind_telegram=telegram_connected),
+                **openclaw.agent_add_command(name, provider, model, telegram_account_id=telegram_account_id),
             }
             result["openclaw_commands"] = openclaw_commands
             result["manager_soul_path"] = str(soul_path) if soul_path else None
             result["manager_soul_error"] = soul_error
             if telegram_token:
                 result["telegram"] = {
-                    "connected": telegram_connected, "error": telegram_error, "dm_policy": telegram_dm_policy,
+                    "connected": telegram_account_id is not None, "account_id": telegram_account_id,
+                    "error": telegram_error, "dm_policy": telegram_dm_policy,
                 }
 
         audit_success = result.get("goose_config_written", True) and soul_error is None and not (result.get("telegram") or {}).get("error")
@@ -943,7 +960,7 @@ def create_app(db_path=None) -> Flask:
             detail={
                 "target": target, "provider": provider, "model": model, "permissions": permissions,
                 "context_limit": context_limit, "telegram_requested": bool(telegram_token),
-                "telegram_connected": telegram_connected if telegram_token else None,
+                "telegram_account_id": telegram_account_id,
             },
         )
         return jsonify(result), 201
@@ -1026,40 +1043,6 @@ def create_app(db_path=None) -> Flask:
             return jsonify(openclaw.get_telegram_status())
         except openclaw.OpenClawCliError as exc:
             return jsonify({"error": "openclaw_error", "error_description": str(exc)}), 502
-
-    @app.post("/v1/admin/openclaw/agents/<agent_id>/telegram")
-    @require_permission(ADMIN_PERMISSION)
-    def openclaw_connect_agent_telegram(agent_id):
-        # For an agent that already exists (unlike the wizard's create-agent
-        # flow, where the OpenClaw agent itself doesn't exist until the user
-        # runs the generated command) — both the channel registration and
-        # the bind can happen directly here, no copy-paste at all.
-        data = request.get_json(force=True)
-        token = (data.get("token") or "").strip()
-        if not token:
-            return jsonify({"error": "invalid_request", "error_description": "token is required"}), 400
-        dm_policy = (data.get("dm_policy") or "pairing").strip()
-        if dm_policy not in openclaw.TELEGRAM_DM_POLICIES:
-            return jsonify({
-                "error": "invalid_request", "error_description": f"dm_policy must be one of {openclaw.TELEGRAM_DM_POLICIES}",
-            }), 400
-        result = {"channel_connected": False, "agent_bound": False, "dm_policy": dm_policy}
-        try:
-            openclaw.connect_telegram_channel(token, dm_policy=dm_policy)
-            result["channel_connected"] = True
-            openclaw.bind_agent_to_telegram(agent_id)
-            result["agent_bound"] = True
-        except openclaw.OpenClawCliError as exc:
-            result["error"] = str(exc)
-            return jsonify(result), 502
-        actor = _actor()
-        audit.log(
-            get_directory().conn, "openclaw.connect_telegram", "success",
-            actor_id=(actor or {}).get("id"), actor_name=(actor or {}).get("name"),
-            resource=f"openclaw-agent:{agent_id}",
-            detail={"dm_policy": dm_policy},
-        )
-        return jsonify(result)
 
     @app.get("/v1/admin/openclaw/telegram/bots")
     @require_permission(ADMIN_PERMISSION)

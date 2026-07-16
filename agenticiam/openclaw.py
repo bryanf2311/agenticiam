@@ -42,26 +42,37 @@ GitHub docs source), not guessed:
   self-hosted /v1/chat/completions-shaped backends (which is what
   ollama.com's hosted API is) — set non-destructively via
   `openclaw config set models.providers.<id> '<json>' --strict-json --merge`.
-- `openclaw channels add --channel telegram --token <token>` registers a
-  bot token non-interactively and — per OpenClaw's own docs — asks a
-  reachable local Gateway to start the account immediately, no restart
-  needed. (Not `--token-file`: that persists as a `tokenFile` config
+- `openclaw channels add --channel telegram --account <id> --name <name>
+  --token <token>` registers a named bot token non-interactively and —
+  per OpenClaw's own docs — asks a reachable local Gateway to start the
+  account immediately, no restart needed; re-running it against the same
+  --account id updates the token in place (confirmed: `channels add
+  --help` describes the command itself as "Add or update a channel
+  account"). (Not `--token-file`: that persists as a `tokenFile` config
   pointer, not a one-time read, and takes precedence over `botToken` even
-  when stale — see connect_telegram_channel's docstring for the real
-  field report.) `channels.telegram.dmPolicy` ("pairing" by default: the bot
-  owner can use it right away, anyone else needs a one-time
+  when stale — see add_or_update_telegram_bot's docstring for the real
+  field report.) `channels.telegram.dmPolicy` ("pairing" by default: the
+  bot owner can use it right away, anyone else needs a one-time
   `openclaw pairing approve telegram <code>`; "open" with
-  `allowFrom: ["*"]` skips that approval for everyone) lives at the same
-  config path handled by _config_set_verified.
-- `openclaw agents bind --agent <id> --bind telegram:*` routes all
-  Telegram traffic to a specific, already-existing agent;
-  `openclaw agents add ... --bind telegram:*` does the same thing at
-  creation time in one step, for a brand new agent.
+  `allowFrom: ["*"]` skips that approval for everyone) is global — shared
+  by every bot account, not per-account — handled by
+  set_telegram_dm_policy.
+- Every account is explicitly named — there's deliberately no implicit
+  "default account" path left anywhere in this module: an earlier version
+  omitted --account (falling back to OpenClaw's own "default"), which
+  caused a real, reported problem (silently colliding with/overwriting
+  whatever else was using that account). `openclaw agents bind --agent
+  <id> --bind telegram:<account>` routes one specific bot's traffic to a
+  specific, already-existing agent; `openclaw agents add ... --bind
+  telegram:<account>` does the same thing at creation time in one step,
+  for a brand new agent. Never `telegram:*` (every account) from this
+  module's own call sites, for the same reason.
 """
 
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -108,6 +119,32 @@ def find_openclaw_binary() -> str:
     return shutil.which("openclaw")
 
 
+def _kill_process_tree(pid: int) -> None:
+    """Kills pid and everything spawned under it, not just pid itself.
+
+    A real field report: after the timeout-and-recover workaround below
+    started shipping, openclaw CLI invocations were still piling up as
+    orphaned processes in Task Manager. subprocess.run's own timeout
+    handling only calls .kill() on the one process it started directly —
+    on Windows that's TerminateProcess on that single PID, on POSIX a
+    plain SIGKILL to that one PID. If openclaw (a Node CLI reaching for
+    a gateway process, per the "[state-migrations]"/never-exits behavior
+    documented on _run_openclaw) spawns anything else along the way,
+    killing just the top-level PID leaves that "anything else" running
+    forever. `taskkill /T` walks the real Windows process tree by
+    parent-child PID, killing every descendant; killpg needs the child
+    started in its own session (see start_new_session below) so its pgid
+    equals its pid and the whole group goes down together.
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _run_openclaw(
     args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT, recover_json_on_timeout: bool = False
 ) -> str:
@@ -125,14 +162,19 @@ def _run_openclaw(
     the gateway, going by the stray "[state-migrations]" warning in this
     build, keeping its event loop alive past the point its actual job was
     finished) — a real quirk of this specific openclaw build/version, not
-    something AgenticIAM's subprocess call is doing wrong. subprocess.run
-    can only tell a genuine hang from "done but won't exit" by whether
-    complete output was produced, so `recover_json_on_timeout` (used by
-    _run_openclaw_json, the read-only paths) parses whatever partial stdout
-    the timeout captured and treats successfully-parsed JSON as the real
-    result rather than a failure — see also OpenClawTimeoutError for the
-    read-back-and-verify fallback mutations use for the same underlying
-    issue.
+    something AgenticIAM's subprocess call is doing wrong. `recover_json_on_
+    timeout` (used by _run_openclaw_json, the read-only paths) parses
+    whatever partial stdout the timeout captured and treats successfully-
+    parsed JSON as the real result rather than a failure — see also
+    OpenClawTimeoutError for the read-back-and-verify fallback mutations
+    use for the same underlying issue.
+
+    Uses Popen directly, not subprocess.run: a third field report showed
+    that "quirk" piling up as orphaned processes in Task Manager over
+    normal use of this app — subprocess.run's built-in timeout handling
+    can only kill the one process it started, not anything that process
+    spawned, so this explicitly kills the whole tree instead (see
+    _kill_process_tree).
     """
     binary = openclaw_binary or find_openclaw_binary() or "openclaw"
     cmd = [binary, *args]
@@ -147,13 +189,25 @@ def _run_openclaw(
     popen_kwargs = {"stdin": subprocess.DEVNULL}
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        # Own session so the child's pgid equals its pid — required for
+        # _kill_process_tree's os.killpg to reach the whole tree rather
+        # than just this one process.
+        popen_kwargs["start_new_session"] = True
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **popen_kwargs)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen_kwargs)
     except FileNotFoundError as exc:
         raise OpenClawCliError(f"openclaw executable not found ({binary})") from exc
-    except subprocess.TimeoutExpired as exc:
-        partial_out = (getattr(exc, "stdout", None) or "").strip()
-        partial_err = (getattr(exc, "stderr", None) or "").strip()
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc.pid)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        partial_out = (stdout or "").strip()
+        partial_err = (stderr or "").strip()
         if recover_json_on_timeout and partial_out:
             try:
                 json.loads(partial_out)
@@ -166,10 +220,10 @@ def _run_openclaw(
             detail += f"\nstderr so far:\n{partial_err[-2000:]}"
         if partial_out:
             detail += f"\nstdout so far:\n{partial_out[-2000:]}"
-        raise OpenClawTimeoutError(f"openclaw {' '.join(args)} timed out after {timeout}s{detail}") from exc
-    if result.returncode != 0:
-        raise OpenClawCliError((result.stderr or "").strip() or f"openclaw {' '.join(args)} exited with status {result.returncode}")
-    return result.stdout or ""
+        raise OpenClawTimeoutError(f"openclaw {' '.join(args)} timed out after {timeout}s{detail}")
+    if proc.returncode != 0:
+        raise OpenClawCliError((stderr or "").strip() or f"openclaw {' '.join(args)} exited with status {proc.returncode}")
+    return stdout or ""
 
 
 def _run_openclaw_json(args: list, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT):
@@ -299,43 +353,19 @@ def set_website_allowlist(hostnames: list, openclaw_binary: str = None, timeout:
 TELEGRAM_DM_POLICIES = ("pairing", "open")
 
 
-def connect_telegram_channel(
-    token: str, dm_policy: str = "pairing", openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
+def set_telegram_dm_policy(
+    dm_policy: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
 ) -> None:
-    """Registers a BotFather token with OpenClaw and starts it — per
-    OpenClaw's own docs, `channels add` "asks a reachable local Gateway to
-    start the account" right away, no restart needed, so the bot is live
-    on Telegram as soon as this returns.
-
-    Uses --token, not --token-file: a real field report (a user reading
-    their own openclaw.json after their bot went dark) showed --token-file
-    persists as a `tokenFile` config entry pointing at the path it was
-    given — not a one-time read — and that `tokenFile` takes precedence
-    over `botToken` even when a perfectly good inline token is also
-    present. This module's own previous version deleted its temp file
-    right after the command ran (to avoid a bare --token argument sitting
-    in argv/`ps aux` for the life of the subprocess call), which orphaned
-    that reference immediately: the very next time OpenClaw read its
-    config, `tokenFile` pointed at nothing and the channel silently failed
-    to authenticate, `botToken` never getting a chance to be used. The
-    token ends up persisted in openclaw.json in plaintext either way
-    (that's the whole point — the bot needs it long-term to keep
-    running), so the momentary argv exposure --token trades for is a much
-    smaller risk than a channel that goes dark on the next gateway
-    restart.
-
-    dm_policy="pairing" (OpenClaw's own default) means only the bot owner
-    can use it immediately; anyone else needs a one-time
+    """dm_policy="pairing" (OpenClaw's own default) means only the bot
+    owner can use a Telegram bot immediately; anyone else needs a one-time
     `openclaw pairing approve telegram <code>`. dm_policy="open" also sets
     allowFrom: ["*"] so nobody needs approval — see docs.openclaw.ai/
-    channels/telegram for the tradeoff.
+    channels/telegram for the tradeoff. This is genuinely global — one
+    setting shared by every bot account, not per-account — so it's kept
+    separate from add_or_update_telegram_bot rather than folded into it.
     """
     if dm_policy not in TELEGRAM_DM_POLICIES:
         raise ValueError(f"dm_policy must be one of {TELEGRAM_DM_POLICIES}")
-    _run_openclaw(
-        ["channels", "add", "--channel", "telegram", "--token", token],
-        openclaw_binary=openclaw_binary, timeout=timeout,
-    )
     if dm_policy == "open":
         _config_set_verified("channels.telegram.dmPolicy", "open", openclaw_binary=openclaw_binary, timeout=timeout)
         _config_set_verified("channels.telegram.allowFrom", ["*"], openclaw_binary=openclaw_binary, timeout=timeout)
@@ -346,7 +376,7 @@ def connect_telegram_channel(
 def get_telegram_status(openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> dict:
     """Whether Telegram is configured at all, and its current dmPolicy —
     read straight from `channels.telegram`, the same path
-    connect_telegram_channel writes to. Surfacing this (rather than only
+    set_telegram_dm_policy writes to. Surfacing this (rather than only
     showing it right after a successful connect) matters because a bot
     can sit fully configured with dmPolicy="pairing" and nobody's pending
     approvals ever get checked — the UI otherwise gives no hint that a
@@ -355,16 +385,6 @@ def get_telegram_status(openclaw_binary: str = None, timeout: float = DEFAULT_CL
     data = data or {}
     configured = bool(data.get("enabled")) or bool(data.get("botToken"))
     return {"configured": configured, "dm_policy": data.get("dmPolicy") or "pairing"}
-
-
-def bind_agent_to_telegram(agent_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT) -> None:
-    """Routes all Telegram traffic to an already-existing agent. For an
-    agent that doesn't exist yet, pass bind_telegram=True to
-    agent_add_command instead — `agents add ... --bind telegram:*` does
-    both in the one command the user runs to create it."""
-    _run_openclaw(
-        ["agents", "bind", "--agent", agent_id, "--bind", "telegram:*"], openclaw_binary=openclaw_binary, timeout=timeout
-    )
 
 
 # ---------------------------------------------------------------- multiple Telegram bots
@@ -453,9 +473,9 @@ def bind_agent_to_telegram_account(
     agent_id: str, account_id: str, openclaw_binary: str = None, timeout: float = DEFAULT_CLI_TIMEOUT
 ) -> None:
     """Routes just one Telegram bot's traffic to a specific agent —
-    `--bind <channel>:<accountId>` (confirmed against docs/cli/agents.md),
-    as opposed to bind_agent_to_telegram's `telegram:*` (every account).
-    Other bots' routing is untouched."""
+    `--bind <channel>:<accountId>` (confirmed against docs/cli/agents.md).
+    Never `telegram:*` (every account) — see this module's docstring for
+    why. Other bots' routing is untouched."""
     _run_openclaw(
         ["agents", "bind", "--agent", agent_id, "--bind", f"telegram:{account_id}"],
         openclaw_binary=openclaw_binary, timeout=timeout,
@@ -515,27 +535,30 @@ def mcp_add_commands(name: str, cmd: str, args: list, token: str) -> dict:
 _PROVIDER_ID_OVERRIDES = {"ollama_cloud": OLLAMA_CLOUD_PROVIDER_ID}
 
 
-def agent_add_command(name: str, provider: str, model: str, bind_telegram: bool = False) -> dict:
+def agent_add_command(name: str, provider: str, model: str, telegram_account_id: str = None) -> dict:
     """`openclaw agents add` invocation that creates the persona (workspace,
     session store, model) — the OpenClaw equivalent of Goose's `goose
     session -n <name>` / `goose run --recipe ...` launch command.
 
-    bind_telegram=True appends `--bind telegram:*`: since this command is
+    telegram_account_id appends `--bind telegram:<account_id>` (a specific
+    bot, never a `telegram:*` wildcard — binding every account to a brand
+    new agent silently steals routing from any other bot already pointed
+    elsewhere, a real problem this used to cause): since this command is
     the one the user actually runs to bring the new agent into existence
     (still copy-paste — OpenClaw agent creation isn't run directly the way
-    Telegram channel registration is; see connect_telegram_channel), it's
+    Telegram bot registration is; see add_or_update_telegram_bot), it's
     also the earliest point a not-yet-existing agent *can* be bound to a
-    channel. connect_telegram_channel already made the bot live pointing
-    at OpenClaw's default agent by the time this command gets run; running
-    it hands Telegram routing over to this new agent in the same step,
-    with no separate `agents bind` call needed."""
+    channel. add_or_update_telegram_bot already made the named bot live,
+    routed to OpenClaw's default agent, by the time this command gets
+    run; running it hands routing for that one bot over to this new agent
+    in the same step, with no separate `agents bind` call needed."""
     slug = slugify(name)
     openclaw_provider = _PROVIDER_ID_OVERRIDES.get(provider, provider)
     model_ref = f"{openclaw_provider}/{model}" if openclaw_provider and model else model
     ws = workspace_path(name)
     cmd = f'openclaw agents add {slug} --model "{model_ref}" --non-interactive --workspace "{ws}"'
-    if bind_telegram:
-        cmd += " --bind telegram:*"
+    if telegram_account_id:
+        cmd += f" --bind telegram:{telegram_account_id}"
     return {"bash": cmd, "powershell": cmd, "cmd": cmd}
 
 

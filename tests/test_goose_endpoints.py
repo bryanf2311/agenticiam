@@ -236,10 +236,30 @@ def test_create_openclaw_agent_with_telegram_token_connects_and_binds(
     client, admin_headers, goose_config_path, openclaw_workspace_root, monkeypatch
 ):
     calls = {}
-    monkeypatch.setattr(
-        openclaw, "connect_telegram_channel",
-        lambda token, dm_policy="pairing": calls.setdefault("connect", (token, dm_policy)),
+
+    def fake_add(name, token, account_id=None):
+        calls["add"] = (name, token)
+        return "boss"
+
+    monkeypatch.setattr(openclaw, "add_or_update_telegram_bot", fake_add)
+    monkeypatch.setattr(openclaw, "set_telegram_dm_policy", lambda dm_policy: calls.setdefault("dm_policy", dm_policy))
+    resp = client.post(
+        "/v1/admin/goose/agents",
+        json={
+            "name": "boss", "target": "openclaw", "permissions": [], "provider": "ollama", "model": "llama3.1:8b",
+            "telegram_token": "sk-fake-bot-token", "telegram_bot_name": "Boss Bot",
+        },
+        headers=admin_headers,
     )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert calls["add"] == ("Boss Bot", "sk-fake-bot-token")
+    assert calls["dm_policy"] == "pairing"
+    assert body["telegram"] == {"connected": True, "account_id": "boss", "error": None, "dm_policy": "pairing"}
+    assert body["openclaw_commands"]["create_agent"]["bash"].endswith("--bind telegram:boss")
+
+
+def test_create_openclaw_agent_telegram_token_without_bot_name_rejected(client, admin_headers, goose_config_path):
     resp = client.post(
         "/v1/admin/goose/agents",
         json={
@@ -248,11 +268,8 @@ def test_create_openclaw_agent_with_telegram_token_connects_and_binds(
         },
         headers=admin_headers,
     )
-    assert resp.status_code == 201
-    body = resp.get_json()
-    assert calls["connect"] == ("sk-fake-bot-token", "pairing")
-    assert body["telegram"] == {"connected": True, "error": None, "dm_policy": "pairing"}
-    assert body["openclaw_commands"]["create_agent"]["bash"].endswith("--bind telegram:*")
+    assert resp.status_code == 400
+    assert "telegram_bot_name" in resp.get_json()["error_description"]
 
 
 def test_create_openclaw_agent_without_telegram_token_has_no_telegram_field(
@@ -271,15 +288,15 @@ def test_create_openclaw_agent_without_telegram_token_has_no_telegram_field(
 def test_create_openclaw_agent_telegram_failure_still_creates_identity(
     client, admin_headers, goose_config_path, openclaw_workspace_root, monkeypatch
 ):
-    def raise_error(token, dm_policy="pairing"):
+    def raise_error(name, token, account_id=None):
         raise openclaw.OpenClawCliError("bad token")
 
-    monkeypatch.setattr(openclaw, "connect_telegram_channel", raise_error)
+    monkeypatch.setattr(openclaw, "add_or_update_telegram_bot", raise_error)
     resp = client.post(
         "/v1/admin/goose/agents",
         json={
             "name": "boss", "target": "openclaw", "permissions": [], "provider": "ollama", "model": "llama3.1:8b",
-            "telegram_token": "sk-fake-bot-token",
+            "telegram_token": "sk-fake-bot-token", "telegram_bot_name": "Boss Bot",
         },
         headers=admin_headers,
     )
@@ -287,7 +304,7 @@ def test_create_openclaw_agent_telegram_failure_still_creates_identity(
     # because the bonus Telegram connection failed
     assert resp.status_code == 201
     body = resp.get_json()
-    assert body["telegram"] == {"connected": False, "error": "bad token", "dm_policy": "pairing"}
+    assert body["telegram"] == {"connected": False, "account_id": None, "error": "bad token", "dm_policy": "pairing"}
     assert "telegram" not in body["openclaw_commands"]["create_agent"]["bash"]
     identity = client.get("/v1/admin/identities/boss", headers=admin_headers).get_json()
     assert identity["name"] == "boss"
@@ -298,7 +315,7 @@ def test_create_openclaw_agent_telegram_invalid_dm_policy_rejected(client, admin
         "/v1/admin/goose/agents",
         json={
             "name": "boss", "target": "openclaw", "permissions": [], "provider": "ollama", "model": "llama3.1:8b",
-            "telegram_token": "sk-fake", "telegram_dm_policy": "whatever",
+            "telegram_token": "sk-fake", "telegram_bot_name": "Boss Bot", "telegram_dm_policy": "whatever",
         },
         headers=admin_headers,
     )
@@ -309,7 +326,7 @@ def test_create_goose_agent_ignores_telegram_token(client, admin_headers, goose_
     def fail_if_called(*a, **k):
         raise AssertionError("Telegram is an OpenClaw-only concept, must not be touched for target=goose")
 
-    monkeypatch.setattr(openclaw, "connect_telegram_channel", fail_if_called)
+    monkeypatch.setattr(openclaw, "add_or_update_telegram_bot", fail_if_called)
     resp = client.post(
         "/v1/admin/goose/agents",
         json={

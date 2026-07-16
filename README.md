@@ -331,49 +331,55 @@ Two things worth knowing:
 
 ### Telegram (OpenClaw target only)
 
-Step 3 has an optional "Telegram" section: paste a bot token from
-`@BotFather` (message it in Telegram, run `/newbot`) and the bot connects
-*immediately* — this is the one piece of the OpenClaw flow AgenticIAM runs
-directly rather than generating a command for, because `openclaw channels
-add --channel telegram --token <token>` asks a reachable local Gateway to
-start the account right away, no restart needed. It's live pointing at
-OpenClaw's default agent the moment you submit the wizard — before you've
-even copied the create-agent command in step 5.
+OpenClaw supports several Telegram bots at once — each its own
+`@BotFather` token, independently routable to a different agent
+(`channels.telegram.accounts.<id>`, confirmed against a real `openclaw
+channels add --help`/`channels list --json`/`channels remove --help` on a
+live install, not guessed). Every bot AgenticIAM connects is explicitly
+named — there's deliberately no implicit "default account" path anywhere
+in this flow. An earlier version omitted `--account` and bound with
+`telegram:*` (every account); in real use that silently overwrote/stole
+routing from whatever else was using the default account, so it was
+removed rather than patched.
+
+Step 3 has an optional "Telegram" section: give the bot a name (pre-filled
+with the agent's own name, editable) and paste its token from `@BotFather`
+(message it in Telegram, run `/newbot`) — it connects *immediately*, the
+one piece of the OpenClaw flow AgenticIAM runs directly rather than
+generating a command for, because `openclaw channels add --channel
+telegram --account <slug-of-name> --name <name> --token <token>` asks a
+reachable local Gateway to start the account right away, no restart
+needed. It's live — routed to OpenClaw's default agent — the moment you
+submit the wizard, before you've even copied the create-agent command in
+step 5.
 
 The one remaining copy-paste step (creating the OpenClaw agent itself —
-still not run directly; see above) gets `--bind telegram:*` appended
-automatically when Telegram was connected, so running that single command
-both brings the new agent into existence *and* hands Telegram routing over
-to it — no separate `openclaw agents bind` call needed.
+still not run directly; see above) gets `--bind telegram:<account>`
+appended automatically for that specific bot, so running that single
+command both brings the new agent into existence *and* hands that one
+bot's routing over to it, without touching any other bot's routing.
 
 Access control: OpenClaw's default DM policy is `"pairing"` — you (the bot
 owner) can use it immediately, but anyone else's first message gets a
 pairing code you approve with `openclaw pairing approve telegram <code>`.
 The wizard's "let anyone message the bot immediately" checkbox switches
 this to `"open"` (sets `allowFrom: ["*"]`) instead — a public bot with no
-approval step, your call per bot.
+approval step, your call. This is genuinely a global setting shared by
+every bot, not per-bot, on OpenClaw's own side — not a limitation
+introduced here.
 
-Already have an OpenClaw agent (created outside the wizard, or from an
-earlier session)? The **OpenClaw Agents tab** has the same "Connect
-Telegram" action per agent — since that agent already exists, both the
-token registration *and* the bind happen directly, no copy-paste at all.
+If the token registration fails, the agent identity itself is still
+created — the error is surfaced rather than losing the rest of the work.
 
-If the token or the bind fails, the agent identity itself is still created
-(or, from the Agents tab, the agent is left as it was) — the error is
-surfaced rather than losing the rest of the work.
+### Telegram Bots tab: manage bots you already have
 
-### Telegram Bots tab: more than one bot, each its own agent
+Already have an OpenClaw agent (created outside the wizard, from an
+earlier session, or just want to connect/rename/rebind a bot without
+creating a new agent)? The **Telegram Bots** tab is where you manage every
+bot on this server directly, no copy-paste:
 
-OpenClaw supports several Telegram bots at once — each its own
-`@BotFather` token, independently routable to a different agent
-(`channels.telegram.accounts.<id>`, confirmed against a real
-`openclaw channels add --help`/`channels list --json`/`channels remove
---help` on a live install, not guessed). The **Telegram Bots** tab is
-where you manage that:
-
-- **Add a bot**: name it and paste its token. Connects immediately
-  (`openclaw channels add --channel telegram --account <slug-of-name>
-  --name <name> --token <token>`), same as the wizard's Telegram step.
+- **Add a bot**: name it and paste its token. Connects immediately, same
+  mechanism as the wizard's Telegram step.
 - **Update a bot's token**: click "Update token" on an existing bot, paste
   the new one, save. This re-runs the same `channels add` command against
   the same account id — confirmed via `channels add --help` that the
@@ -384,7 +390,7 @@ where you manage that:
 - **Bind a bot to an agent**: pick an agent from the dropdown next to any
   bot and click Bind (`openclaw agents bind --agent <id> --bind
   telegram:<account>`) — routes just that one bot's traffic, leaving
-  every other bot's routing alone.
+  every other bot's routing alone. Never a `telegram:*` wildcard.
 - **Remove a bot**: deletes it from OpenClaw entirely (`openclaw channels
   remove --channel telegram --account <id> --delete`) — asks for
   confirmation first since it's not reversible from here.
@@ -394,20 +400,6 @@ OpenClaw's — a real `channels list --json` only returns bare account-id
 strings, no name field to read back. If OpenClaw's own config ever
 disagrees with what's stored here (edited outside AgenticIAM, a fresh
 install, ...), a bot may show up under its raw account id until renamed.
-
-**DM policy is shared by every bot**, not per-bot — same `"pairing"` vs
-`"open"` tradeoff as the single-bot wizard flow, because OpenClaw's
-`channels.telegram.dmPolicy` isn't scoped by account. The tab surfaces the
-current value for context but doesn't let you set a different one per bot,
-since that setting doesn't actually exist per bot on OpenClaw's side.
-
-**One interaction worth knowing**: the wizard/Agents-tab "Connect
-Telegram" action binds with `telegram:*` — *every* account, not just the
-default one. If you also manage bots individually from this tab, running
-that wildcard bind again will silently move all of them (including ones
-you'd deliberately routed elsewhere) to whichever agent you just connected
-it to. Stick to per-bot binds from this tab once you have more than one
-bot connected.
 
 ## Teams (groups)
 
@@ -662,6 +654,16 @@ finished). AgenticIAM works around this rather than surfacing a false
 failure: reads recover a complete result straight out of the timeout if
 one was produced; writes that time out are verified with a follow-up
 read before being reported as failed.
+
+That workaround alone wasn't enough, though — a real report showed
+`openclaw` CLI invocations piling up as orphaned processes over normal use
+of this app. subprocess's own timeout handling only kills the one process
+it started directly; if `openclaw` spawns anything else along the way
+(reaching for a gateway connection, going by the behavior above), killing
+just the top-level process leaves that "anything else" running. Every
+openclaw CLI call from AgenticIAM now explicitly kills the *whole* process
+tree on a timeout (`taskkill /T` on Windows, a process-group kill on
+POSIX) rather than relying on the default single-process kill.
 
 ## CLI reference
 
